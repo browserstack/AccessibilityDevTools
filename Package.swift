@@ -23,6 +23,7 @@ let package = Package(
                         scope: .all(),
                         reason: "Please allow network connection permission to authenticate and run accessibility rules."
                     ),
+                    .writeToPackageDirectory(reason: "Please allow writing to package directory for logging.")
                 ]
             )
         )
