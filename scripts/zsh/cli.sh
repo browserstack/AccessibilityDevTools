@@ -84,7 +84,7 @@ a11y_scan() {
 }
 
 script_self_update() {
-  local remote_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/bash/spm.sh"
+  local remote_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/cli.sh"
 
   updated_script=$(curl -R -z "$SCRIPT_PATH" "$remote_url")
   if [[ $updated_script =~ ^#! ]]; then
