@@ -2,8 +2,8 @@
 
 # Shell specific
 zsh_bin=$(command -v zsh)
-BROWSERSTACK_USERNAME=$($zsh_bin -c 'echo $BROWSERSTACK_USERNAME')
-BROWSERSTACK_ACCESS_KEY=$($zsh_bin -c 'echo $BROWSERSTACK_ACCESS_KEY')
+export BROWSERSTACK_USERNAME=$($zsh_bin -lic 'echo $BROWSERSTACK_USERNAME')
+export BROWSERSTACK_ACCESS_KEY=$($zsh_bin -lic 'echo $BROWSERSTACK_ACCESS_KEY')
 
 # Don't change anything after this, same as the bash equivalent
 [ -f "${PWD}/Package.swift" ]
