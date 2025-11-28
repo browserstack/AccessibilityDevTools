@@ -2,8 +2,8 @@
 
 # Shell specific
 zsh_bin=$(command -v zsh)
-export BROWSERSTACK_USERNAME=$($zsh_bin -lic 'echo $BROWSERSTACK_USERNAME')
-export BROWSERSTACK_ACCESS_KEY=$($zsh_bin -lic 'echo $BROWSERSTACK_ACCESS_KEY')
+export BROWSERSTACK_USERNAME=$($zsh_bin -lic 'echo $BROWSERSTACK_USERNAME' | tail -n 1)
+export BROWSERSTACK_ACCESS_KEY=$($zsh_bin -lic 'echo $BROWSERSTACK_ACCESS_KEY' | tail -n 1)
 
 GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 SCRIPT_PATH=$(realpath --relative-to="$GIT_ROOT" "$0" 2>/dev/null || realpath "$0")

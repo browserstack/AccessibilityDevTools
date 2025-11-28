@@ -2,8 +2,8 @@
 
 # Shell specific
 fish_bin=$(command -v fish)
-export BROWSERSTACK_USERNAME=$($fish_bin -lic 'echo $BROWSERSTACK_USERNAME')
-export BROWSERSTACK_ACCESS_KEY=$($fish_bin -lic 'echo $BROWSERSTACK_ACCESS_KEY')
+export BROWSERSTACK_USERNAME=$($fish_bin -lic 'echo $BROWSERSTACK_USERNAME' | tail -n 1)
+export BROWSERSTACK_ACCESS_KEY=$($fish_bin -lic 'echo $BROWSERSTACK_ACCESS_KEY' | tail -n 1)
 
 # Don't change anything after this, same as the bash equivalent
 [ -f "${PWD}/Package.swift" ]
