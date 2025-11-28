@@ -2,8 +2,8 @@
 
 # Shell specific
 zsh_bin=$(command -v zsh)
-BROWSERSTACK_USERNAME=$($zsh_bin -c 'echo $BROWSERSTACK_USERNAME')
-BROWSERSTACK_ACCESS_KEY=$($zsh_bin -c 'echo $BROWSERSTACK_ACCESS_KEY')
+export BROWSERSTACK_USERNAME=$($zsh_bin -lic 'echo $BROWSERSTACK_USERNAME')
+export BROWSERSTACK_ACCESS_KEY=$($zsh_bin -lic 'echo $BROWSERSTACK_ACCESS_KEY')
 
 GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 SCRIPT_PATH=$(realpath --relative-to="$GIT_ROOT" "$0" 2>/dev/null || realpath "$0")
@@ -103,6 +103,7 @@ if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   exit 0
 fi
 
+download_binary
 a11y_scan
 
 

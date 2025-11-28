@@ -98,4 +98,5 @@ if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   exit 0
 fi
 
+download_binary
 a11y_scan
