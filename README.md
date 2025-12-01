@@ -80,6 +80,7 @@ Xcode will now automatically run the accessibility scan during builds.
 
 ### 2. Projects created with Swift package manager
 **Register plugin as dependency in your `Package.swift` file**
+
 Edit the `Package.swift` to include following code. Specifically, add these two things:
 
 * Add `AccessibilityDevTools` as a package under dependencies
@@ -106,32 +107,6 @@ let package = Package(
                     package: "AccessibilityDevTools"
                 )            
             ]        
-        )
-    ]
-)
-```
-
-**Add plugin in your `Package.swift`**
-
-Edit the `Project.swift` to include following code. Specifically, these two things to be added
-
-* Add `AccessibilityDevTools` as a package under dependencies
-
-* Add `a11y-scan` as a plugin under each target that you have in your project
-
-```swift
-let package = Package(
-    name: "MySPMProject",
-    dependencies: [
-        .package(url: "https://github.com/browserstack/AccessibilityDevTools.git", from: "1.0.0")
-    ],
-    targets: [
-        .executableTarget(
-            name: "MyApp",
-            dependencies: [],
-            plugins: [
-                .plugin(name: "a11y-scan", package: "AccessibilityDevTools")
-            ]
         )
     ]
 )
