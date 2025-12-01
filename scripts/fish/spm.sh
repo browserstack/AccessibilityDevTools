@@ -1,5 +1,6 @@
 #!/usr/bin/env bash -il
 
+export PATH="$PATH:/opt/homebrew/bin"
 # Shell specific
 fish_bin=$(command -v fish)
 
