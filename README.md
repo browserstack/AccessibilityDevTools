@@ -11,10 +11,15 @@ AccessibilityDevTools enables static accessibility linting directly inside Xcode
 * ⚡ **Runs during build** using the SPM command plugin
 
 ---
+## Supported projects types
+1. Projects created with Swift package manager
+2. Projects created with XCode
+
+---
 ## Authentication
 1. Log in to your BrowserStack account or [sign up](https://www.browserstack.com/users/sign_in) if you don’t have an account.
 2. Obtain your **Username** and **Access Key** from the [Account & Profile section](https://www.browserstack.com/accounts/profile/details) section on the dashboard.
-![Account & Profile section](./resources/a31150e8-6beb-4541-bc2a-e1d9f03e431d.png "Account & Profile section")
+![Account & Profile section](./resources/accounts.png "Account & Profile section")
 
 3. Set the following environment variables using the **Username** and **Access Key** you obtained in step 2.
     * `BROWSERSTACK_USERNAME`
@@ -38,79 +43,123 @@ AccessibilityDevTools enables static accessibility linting directly inside Xcode
 
 ---
 ## Installation
-### SwiftPM Projects
-For SwiftPM projects, you can use the SPM `command plugin` for Accessibility DevTools.
+### 1. Projects created with XCode
+> Note: XCode projects don’t have a Package.swift file. However, the script will manage this for you. If you prefer not to do this or face any issues, you can use our CLI for linting instead.
 
-**Add plugin in your `Package.swift`**
+#### Clone Script
+Run the following command at the <span style="color:red">root of your repository</span>
 
-Edit the `Project.swift` to include following code. Specifically, these two things to be added
+Zsh
+```zsh
+curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
+```
+
+Bash
+```bash
+curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/bash/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
+```
+
+Fish
+```fish
+curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
+```
+
+#### Add a Build Phase
+Repeat these steps for each target in your project
+
+1. Select a target from the targets left sidebar and go to Build Phases tab
+2. Click + to create a new build phase. Name the newly created build phase to a name such as **BrowserStack Accessibility Linter**.
+![Build Phase](./resources/build-phase.png "Build Phase")
+3. Drag this newly created build phase above **Compile Sources** step
+4. Delete any existing code in the newly created build step and add the following code.
+5. Add this script:
+```
+./browserstack-a11y-scan-spm.sh --include **/*.swift --non-strict
+```
+Xcode will now automatically run the accessibility scan during builds.
+
+### 2. Projects created with Swift package manager
+**Register plugin as dependency in your `Package.swift` file**
+
+Edit the `Package.swift` to include following code. Specifically, add these two things:
 
 * Add `AccessibilityDevTools` as a package under dependencies
-
 * Add `a11y-scan` as a plugin under each target that you have in your project
 
 ```swift
 let package = Package(
-    name: "MySPMProject",
-    dependencies: [
-        .package(url: "https://github.com/browserstack/AccessibilityDevTools.git", from: "1.0.0")
+    name: "MyProject",
+    // platforms, products, etc.    
+    dependencies: [        
+        // other dependencies        
+        .package(
+            url: "https://github.com/browserstack/AccessibilityDevTools.git",
+            branch: "main"
+        ),
     ],
     targets: [
-        .executableTarget(
-            name: "MyApp",
-            dependencies: [],
-            plugins: [
-                .plugin(name: "a11y-scan", package: "AccessibilityDevTools")
-            ]
+        .executableTarget(            
+            name: "MyApp",            
+            dependencies: [],            
+            plugins: [                
+                .plugin(
+                    name: "a11y-scan",
+                    package: "AccessibilityDevTools"
+                )            
+            ]        
         )
     ]
 )
 ```
-**Add a Build Phase to run the plugin**
-1. Select first item (project root) in the left folder tree and go to Build Phases tab
-![Build Phases](./resources/25519c9c-87a9-41af-b97b-23f875faf3b7.png "Build Phases")
-2. Click + to create a new build phase. Name the newly created build phase to a name such as **BrowserStack Accessibility Linter**
-3. Drag this newly created build phase above **Compile Sources** step
-4. Delete any existing code in the newly created build step and add the following code. 
-5. Add this script:
-```bash
-/usr/bin/xcrun swift package scan --disable-sandbox --include **/*.swift
+
+#### Clone Script
+Run the following command in the <span style="color:red;">root of your repository</span>
+
+Zsh
+```zsh
+curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
 ```
 
+Bash
+```bash
+curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/bash/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
+```
+
+Fish
+```fish
+curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
+```
+
+#### Add a Build Phase
+Repeat these steps for each target in your project
+
+1. Select a target from the targets left sidebar and go to Build Phases tab
+2. Click + to create a new build phase. Name the newly created build phase to a name such as **BrowserStack Accessibility Linter**
+![Build Phase](./resources/build-phase.png "Build Phase")
+3. Drag this newly created build phase above **Compile Sources** step
+4. Delete any existing code in the newly created build step and add the following code.
+5. Add this script:
+```
+./browserstack-a11y-scan-spm.sh --include **/*.swift --non-strict
+```
 Xcode will now automatically run the accessibility scan during builds.
-
-### Non-SwiftPM Projects
-For all non-SwiftPM projects (e.g. Xcode projects), you can use the **browserstack-cli**
-
-**Install CLI in the project repo**
-1. Open terminal and navigate to the project folder.
-2. Run the commands provided in the [documentation](https://www.browserstack.com/docs/accessibility-dev-tools/run-checks-cli#install-the-cli)
-
-**Disable Sandboxing**
-1. In Xcode project, select first item (project root) in the left folder tree and go to Build Settings tab
-2. Search for sandbox > Set user script sandboxing to “NO”
-
-**Add a Build Phase to run the plugin**
-1. Select first item (project root) in the left folder tree and go to Build Phases tab
-![Build Phases](./resources/25519c9c-87a9-41af-b97b-23f875faf3b7.png "Build Phases")
-2. Click + to create a new build phase. Name the newly created build phase to a name such as **BrowserStack Accessibility Linter**
-3. Drag this newly created build phase above **Compile Sources** step
-4. Delete any existing code in the newly created build step and add the following code. 
-5. Add this script:
-```bash
-./browserstack-cli accessibility --include **/*.swift
-```
 
 ---
 ## Running Accessibility Scans
-Press Cmd + B to build the project. If there are no errors from the linter (and any other build steps you have), the build will succeed.
+Press Cmd + B to build the project. 
+* If there are any Accessibility issues, then they will be show up in the Issue Navigator.
+![Issue Navigator](./resources/issue-navigator.png "Issue Navigator")
+* The errors will also show up in the respective files, on the lines where the issue has occurred. Click on the cross mark to see the full error.
+![Issue Details](./resources/issue-details.png "Issue Details")
+* If --non-strict flag is passed, the build will succeed even if there are Accessibility issues. If --non-strict flag is not passed, then the build will fail if there are Accessibility issues.
 
-If issues are found:
-
-* Inline red markers show errors in files. Click on the cross mark to see the full error.
-![Diagnostics](./resources/bb7fbc3b-6d19-47e9-93c5-8c4b0ae124a6.png "Diagnostics")
-* All issues appear in the **Issue Navigator**
-![Issue Navigator](./resources/ff9e25c4-0d57-4423-ae0f-fa77b56d99a7.png "Issue Navigator")
+---
+## Register pre-commit hook
+You can run accessibility checks automatically before each commit by running the following command.
+```bash
+./browserstack-a11y-scan-spm.sh register-pre-commit-hook
+```
+You can then edit the `.git/hooks/pre-commit` file to customise the registered pre-commit hook.
 
 ---
 ## Support
