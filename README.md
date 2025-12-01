@@ -47,7 +47,7 @@ AccessibilityDevTools enables static accessibility linting directly inside Xcode
 > Note: XCode projects don’t have a Package.swift file. However, the script will manage this for you. If you prefer not to do this or face any issues, you can use our CLI for linting instead.
 
 #### Clone Script
-Run the following command in the <span style="color:red">root of your repository</span>
+Run the following command at the <span style="color:red">root of your repository</span>
 
 Zsh
 ```zsh
@@ -68,7 +68,7 @@ curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/brow
 Repeat these steps for each target in your project
 
 1. Select a target from the targets left sidebar and go to Build Phases tab
-2. Click + to create a new build phase. Name the newly created build phase to a name such as **BrowserStack Accessibility Linter**
+2. Click + to create a new build phase. Name the newly created build phase to a name such as **BrowserStack Accessibility Linter**.
 ![Build Phase](./resources/build-phase.png "Build Phase")
 3. Drag this newly created build phase above **Compile Sources** step
 4. Delete any existing code in the newly created build step and add the following code.
@@ -80,7 +80,7 @@ Xcode will now automatically run the accessibility scan during builds.
 
 ### 2. Projects created with Swift package manager
 **Register plugin as dependency in your `Package.swift` file**
-Edit the `Package.swift` to include following code. Specifically, add these two things
+Edit the `Package.swift` to include following code. Specifically, add these two things:
 
 * Add `AccessibilityDevTools` as a package under dependencies
 * Add `a11y-scan` as a plugin under each target that you have in your project
@@ -93,7 +93,7 @@ let package = Package(
         // other dependencies        
         .package(
             url: "https://github.com/browserstack/AccessibilityDevTools.git",
-            from: "1.0.0"
+            branch: "main"
         ),
     ],
     targets: [
