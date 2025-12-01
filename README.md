@@ -10,7 +10,7 @@ AccessibilityDevTools enables static accessibility linting directly inside Xcode
 * 🛠 **Inline errors inside Xcode** with remediation guidance
 * ⚡ **Runs during build** using the SPM command plugin
 
---
+---
 ## Supported projects types
 1. Projects created with Swift package manager
 2. Projects created with XCode
