@@ -2,6 +2,12 @@
 
 # Shell specific
 zsh_bin=$(command -v zsh)
+
+if [[ -z "$zsh_bin" ]]; then
+  echo "Zsh shell is not installed(or not available in PATH). Please install Zsh shell to use this script."
+  exit 2
+fi
+
 export BROWSERSTACK_USERNAME=$($zsh_bin -lic 'echo $BROWSERSTACK_USERNAME' | tail -n 1)
 export BROWSERSTACK_ACCESS_KEY=$($zsh_bin -lic 'echo $BROWSERSTACK_ACCESS_KEY' | tail -n 1)
 

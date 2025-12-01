@@ -2,6 +2,12 @@
 
 # Shell specific
 fish_bin=$(command -v fish)
+
+if [[ -z "$fish_bin" ]]; then
+  echo "Fish shell is not installed(or not available in PATH). Please install Fish shell to use this script."
+  exit 2
+fi
+
 export BROWSERSTACK_USERNAME=$($fish_bin -lic 'echo $BROWSERSTACK_USERNAME' | tail -n 1)
 export BROWSERSTACK_ACCESS_KEY=$($fish_bin -lic 'echo $BROWSERSTACK_ACCESS_KEY' | tail -n 1)
 
