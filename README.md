@@ -1,7 +1,7 @@
 # AccessibilityDevTools
-A Swift Package Manager (SPM) command plugin and CLI tool that scans your iOS Swift codebase for accessibility issues using BrowserStack’s Accessibility DevTools rule engine.
+A Swift Package Manager (SPM) command plugin that scans your iOS Swift codebase for accessibility issues using BrowserStack’s Accessibility DevTools rule engine.
 
-AccessibilityDevTools enables static accessibility linting directly inside Xcode, via SwiftPM, or using the standalone BrowserStack CLI, helping teams catch WCAG violations early—before UI tests, QA, or production.
+AccessibilityDevTools enables static accessibility linting directly inside Xcode via SwiftPM, helping teams catch WCAG violations early—before UI tests, QA, or production.
 
 ---
 ## 🚀 Key Capabilities
@@ -12,8 +12,8 @@ AccessibilityDevTools enables static accessibility linting directly inside Xcode
 
 ---
 ## Supported projects types
-1. Projects created with Swift package manager
-2. Projects created with XCode
+1. Projects created with XCode
+2. Projects created with Swift package manager
 
 ---
 ## Authentication
@@ -44,10 +44,10 @@ AccessibilityDevTools enables static accessibility linting directly inside Xcode
 ---
 ## Installation
 ### 1. Projects created with XCode
-> Note: XCode projects don’t have a Package.swift file. However, the script will manage this for you. If you prefer not to do this or face any issues, you can use our CLI for linting instead.
+> Note: XCode projects don’t have a `Package.swift` file. However, the script will manage this for you. If you prefer not to do this or face any issues, you can use our CLI for linting instead.
 
 #### Clone Script
-Run the following command at the <span style="color:red">root of your repository</span>
+Run the following command at the **root of your repository**
 
 Zsh
 ```zsh
@@ -71,7 +71,7 @@ Repeat these steps for each target in your project
 2. Click + to create a new build phase. Name the newly created build phase to a name such as **BrowserStack Accessibility Linter**.
 ![Build Phase](./resources/build-phase.png "Build Phase")
 3. Drag this newly created build phase above **Compile Sources** step
-4. Delete any existing code in the newly created build step and add the following code.
+4. Delete any existing code in the newly created build step and add the following code
 5. Add this script:
 ```
 ./browserstack-a11y-scan-spm.sh --include **/*.swift --non-strict
@@ -113,7 +113,7 @@ let package = Package(
 ```
 
 #### Clone Script
-Run the following command in the <span style="color:red;">root of your repository</span>
+Run the following command at the **root of your repository**
 
 Zsh
 ```zsh
@@ -134,7 +134,7 @@ curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/brow
 Repeat these steps for each target in your project
 
 1. Select a target from the targets left sidebar and go to Build Phases tab
-2. Click + to create a new build phase. Name the newly created build phase to a name such as **BrowserStack Accessibility Linter**
+2. Click + to create a new build phase. Name the newly created build phase to a name such as **BrowserStack Accessibility Linter**.
 ![Build Phase](./resources/build-phase.png "Build Phase")
 3. Drag this newly created build phase above **Compile Sources** step
 4. Delete any existing code in the newly created build step and add the following code.
