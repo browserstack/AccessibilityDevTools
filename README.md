@@ -27,13 +27,13 @@ AccessibilityDevTools enables static accessibility linting directly inside Xcode
 4. To set these variables, add the appropriate export commands to your shell configuration file:
     * **Zsh**: Add the following lines to your `~/.zshrc` file:
     ```zsh
-    export BROWSERSTACK_USERNAME="<your-username>"
-    export BROWSERSTACK_ACCESS_KEY="<your-access-key>"
+    export BROWSERSTACK_USERNAME=<your-username>
+    export BROWSERSTACK_ACCESS_KEY=<your-access-key>
     ```
     * **Bash**: Add the following lines to your `~/.bashrc` or `~/.bash_profile` file:
     ```bash
-    export BROWSERSTACK_USERNAME="<your-username>"
-    export BROWSERSTACK_ACCESS_KEY="<your-access-key>"
+    export BROWSERSTACK_USERNAME=<your-username>
+    export BROWSERSTACK_ACCESS_KEY=<your-access-key>
     ```
     * **Fish Shell**: Add the following lines to your ~/.config/fish/config.fish file:
     ```fish
@@ -44,7 +44,7 @@ AccessibilityDevTools enables static accessibility linting directly inside Xcode
 ---
 ## Installation
 ### 1. Projects created with XCode
-> Note: XCode projects don’t have a `Package.swift` file. However, the script will manage this for you. If you prefer not to do this or face any issues, you can use our CLI for linting instead.
+> Note: XCode projects don’t have a `Package.swift` file. However, the script will manage this for you. If you prefer not to do this or face any issues, you can use our [CLI](https://www.browserstack.com/docs/accessibility-dev-tools/xcode-linter#CLI) for linting instead.
 
 #### Clone Script
 Run the following command at the **root of your repository**
@@ -63,6 +63,9 @@ Fish
 ```fish
 curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
 ```
+#### Disable Sandboxing
+- In Xcode, select first item (project root) in the left folder tree and go to Build Settings tab
+- Search for `sandbox` > Set `User script sandboxing` to “NO”
 
 #### Add a Build Phase
 Repeat these steps for each target in your project
@@ -129,6 +132,10 @@ Fish
 ```fish
 curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
 ```
+
+#### Disable Sandboxing
+- In Xcode, select first item (project root) in the left folder tree and go to Build Settings tab
+- Search for `sandbox` > Set `User script sandboxing` to “NO”
 
 #### Add a Build Phase
 Repeat these steps for each target in your project
