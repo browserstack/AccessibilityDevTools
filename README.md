@@ -51,17 +51,17 @@ Run the following command at the **root of your repository**
 
 Zsh
 ```zsh
-curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
+curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-zsh.sh
 ```
 
 Bash
 ```bash
-curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/bash/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
+curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/bash/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-bash.sh
 ```
 
 Fish
 ```fish
-curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
+curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-fish.sh
 ```
 #### Disable Sandboxing
 - In Xcode, select first item (project root) in the left folder tree and go to Build Settings tab
