@@ -12,8 +12,8 @@ AccessibilityDevTools enables static accessibility linting directly inside Xcode
 
 ---
 ## Supported projects types
-1. Projects created with Swift package manager
-2. Projects created with XCode
+1. Projects created with XCode
+2. Projects created with Swift package manager
 
 ---
 ## Authentication
@@ -63,6 +63,10 @@ Fish
 ```bash
 curl -L -o browserstack-a11y-scan-spm-fish.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-fish.sh
 ```
+
+#### Disable Sandboxing
+1. In Xcode project, select first item (project root) in the left folder tree and go to Build Settings tab
+2. Search for sandbox > Set user script sandboxing to “NO”
 
 #### Add a Build Phase
 Repeat these steps for each target in your project
@@ -142,6 +146,10 @@ Fish
 ```bash
 curl -L -o browserstack-a11y-scan-spm-fish.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-fish.sh
 ```
+
+#### Disable Sandboxing
+1. In Xcode project, select first item (project root) in the left folder tree and go to Build Settings tab
+2. Search for sandbox > Set user script sandboxing to “NO”
 
 #### Add a Build Phase
 Repeat these steps for each target in your project
