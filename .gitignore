@@ -62,3 +62,4 @@ typings/
 yarn-debug.log*
 yarn-error.log*
 TestProject/
+.sot

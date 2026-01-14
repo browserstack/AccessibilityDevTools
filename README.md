@@ -1,7 +1,7 @@
 # AccessibilityDevTools
-A Swift Package Manager (SPM) command plugin that scans your iOS Swift codebase for accessibility issues using BrowserStack’s Accessibility DevTools rule engine.
+A Swift Package Manager (SPM) command plugin and CLI tool that scans your iOS Swift codebase for accessibility issues using BrowserStack’s Accessibility DevTools rule engine.
 
-AccessibilityDevTools enables static accessibility linting directly inside Xcode via SwiftPM, helping teams catch WCAG violations early—before UI tests, QA, or production.
+AccessibilityDevTools enables static accessibility linting directly inside Xcode, via SwiftPM, or using the standalone BrowserStack CLI, helping teams catch WCAG violations early—before UI tests, QA, or production.
 
 ---
 ## 🚀 Key Capabilities
@@ -12,8 +12,8 @@ AccessibilityDevTools enables static accessibility linting directly inside Xcode
 
 ---
 ## Supported projects types
-1. Projects created with XCode
-2. Projects created with Swift package manager
+1. Projects created with Swift package manager
+2. Projects created with XCode
 
 ---
 ## Authentication
@@ -51,21 +51,18 @@ Run the following command at the **root of your repository**
 
 Zsh
 ```zsh
-curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-zsh.sh
+curl -L -o browserstack-a11y-scan-spm-zsh.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-zsh.sh
 ```
 
 Bash
 ```bash
-curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/bash/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-bash.sh
+curl -L -o browserstack-a11y-scan-spm-bash.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/bash/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-bash.sh
 ```
 
 Fish
-```fish
-curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-fish.sh
+```bash
+curl -L -o browserstack-a11y-scan-spm-fish.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-fish.sh
 ```
-#### Disable Sandboxing
-- In Xcode, select first item (project root) in the left folder tree and go to Build Settings tab
-- Search for `sandbox` > Set `User script sandboxing` to “NO”
 
 #### Add a Build Phase
 Repeat these steps for each target in your project
@@ -75,10 +72,23 @@ Repeat these steps for each target in your project
 ![Build Phase](./resources/build-phase.png "Build Phase")
 3. Drag this newly created build phase above **Compile Sources** step
 4. Delete any existing code in the newly created build step and add the following code
-5. Add this script:
+5. Add this script, depending upon the shell you picked earlier:
+
+Zsh
+```zsh
+./browserstack-a11y-scan-spm-zsh.sh --include **/*.swift --non-strict
 ```
-./browserstack-a11y-scan-spm.sh --include **/*.swift --non-strict
+
+Bash
+```bash
+./browserstack-a11y-scan-spm-bash.sh --include **/*.swift --non-strict
 ```
+
+Fish
+```bash
+./browserstack-a11y-scan-spm-fish.sh --include **/*.swift --non-strict
+```
+
 Xcode will now automatically run the accessibility scan during builds.
 
 ### 2. Projects created with Swift package manager
@@ -120,22 +130,18 @@ Run the following command at the **root of your repository**
 
 Zsh
 ```zsh
-curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
+curl -L -o browserstack-a11y-scan-spm-zsh.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-zsh.sh
 ```
 
 Bash
 ```bash
-curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/bash/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
+curl -L -o browserstack-a11y-scan-spm-bash.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/bash/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-bash.sh
 ```
 
 Fish
-```fish
-curl -L -o browserstack-a11y-scan-spm.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm.sh
+```bash
+curl -L -o browserstack-a11y-scan-spm-fish.sh "https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh" && chmod 0775 browserstack-a11y-scan-spm-fish.sh
 ```
-
-#### Disable Sandboxing
-- In Xcode, select first item (project root) in the left folder tree and go to Build Settings tab
-- Search for `sandbox` > Set `User script sandboxing` to “NO”
 
 #### Add a Build Phase
 Repeat these steps for each target in your project
@@ -145,10 +151,23 @@ Repeat these steps for each target in your project
 ![Build Phase](./resources/build-phase.png "Build Phase")
 3. Drag this newly created build phase above **Compile Sources** step
 4. Delete any existing code in the newly created build step and add the following code.
-5. Add this script:
+5. Add this script, depending upon the shell you picked earlier:
+
+Zsh
+```zsh
+./browserstack-a11y-scan-spm-zsh.sh --include **/*.swift --non-strict
 ```
-./browserstack-a11y-scan-spm.sh --include **/*.swift --non-strict
+
+Bash
+```bash
+./browserstack-a11y-scan-spm-bash.sh --include **/*.swift --non-strict
 ```
+
+Fish
+```bash
+./browserstack-a11y-scan-spm-fish.sh --include **/*.swift --non-strict
+```
+
 Xcode will now automatically run the accessibility scan during builds.
 
 ---
@@ -163,9 +182,22 @@ Press Cmd + B to build the project.
 ---
 ## Register pre-commit hook
 You can run accessibility checks automatically before each commit by running the following command.
-```bash
-./browserstack-a11y-scan-spm.sh register-pre-commit-hook
+
+Zsh
+```zsh
+./browserstack-a11y-scan-spm-zsh.sh register-pre-commit-hook
 ```
+
+Bash
+```bash
+./browserstack-a11y-scan-spm-bash.sh register-pre-commit-hook
+```
+
+Fish
+```bash
+./browserstack-a11y-scan-spm-fish.sh register-pre-commit-hook
+```
+
 You can then edit the `.git/hooks/pre-commit` file to customise the registered pre-commit hook.
 
 ---
