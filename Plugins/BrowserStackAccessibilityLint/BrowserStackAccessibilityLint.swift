@@ -82,7 +82,7 @@ private func packageCacheRoot() -> URL {
         }
         let probe = target.appendingPathComponent(".write-probe-\(UUID().uuidString)")
         do {
-            try "probe".data(using: .utf8)?.write(to: probe, options: [.atomic])
+            try "probe".data(using: .utf8)?.write(to: probe, options: [.atomic, .completeFileProtection])
             try? fm.removeItem(at: probe)
         } catch {
             forwardExit(code: 2, message: "Unable to access cache directory. Please include directive \"--allow-writing-to-directory ~/.cache/\" where you are invoking the Swift package")
