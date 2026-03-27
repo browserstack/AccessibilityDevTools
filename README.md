@@ -1,14 +1,15 @@
 # AccessibilityDevTools
-A Swift Package Manager (SPM) command plugin and CLI tool that scans your iOS Swift codebase for accessibility issues using BrowserStack’s Accessibility DevTools rule engine.
+A Swift Package Manager (SPM) command plugin and CLI tool that scans your iOS codebase for accessibility issues using BrowserStack’s Accessibility DevTools rule engine.
 
 AccessibilityDevTools enables static accessibility linting directly inside Xcode, via SwiftPM, or using the standalone BrowserStack CLI, helping teams catch WCAG violations early—before UI tests, QA, or production.
 
 ---
 ## 🚀 Key Capabilities
-* 🔍 **Automatic static accessibility linting** for SwiftUI
+* 🔍 **Automatic static accessibility linting** for SwiftUI and UIKit
 * 🛠 **10+ WCAG-aligned rules** from the Spectra rule engine
 * 🛠 **Inline errors inside Xcode** with remediation guidance
 * ⚡ **Runs during build** using the SPM command plugin
+* 📂 **Broad File Support**: Analyzes .swift, .xib, and .storyboard files
 
 ---
 ## Supported projects types
@@ -80,17 +81,17 @@ Repeat these steps for each target in your project
 
 Zsh
 ```zsh
-./browserstack-a11y-scan-spm-zsh.sh --include **/*.swift --non-strict
+./browserstack-a11y-scan-spm-zsh.sh --include "**/*.swift" --include "**/*.xib" --include "**/*.storyboard" 
 ```
 
 Bash
 ```bash
-./browserstack-a11y-scan-spm-bash.sh --include **/*.swift --non-strict
+./browserstack-a11y-scan-spm-bash.sh --include "**/*.swift" --include "**/*.xib" --include "**/*.storyboard"
 ```
 
 Fish
 ```bash
-./browserstack-a11y-scan-spm-fish.sh --include **/*.swift --non-strict
+./browserstack-a11y-scan-spm-fish.sh --include "**/*.swift" --include "**/*.xib" --include "**/*.storyboard"
 ```
 
 Xcode will now automatically run the accessibility scan during builds.
@@ -163,17 +164,17 @@ Repeat these steps for each target in your project
 
 Zsh
 ```zsh
-./browserstack-a11y-scan-spm-zsh.sh --include **/*.swift --non-strict
+./browserstack-a11y-scan-spm-zsh.sh --include "**/*.swift" --include "**/*.xib" --include "**/*.storyboard"
 ```
 
 Bash
 ```bash
-./browserstack-a11y-scan-spm-bash.sh --include **/*.swift --non-strict
+./browserstack-a11y-scan-spm-bash.sh --include "**/*.swift" --include "**/*.xib" --include "**/*.storyboard"
 ```
 
 Fish
 ```bash
-./browserstack-a11y-scan-spm-fish.sh --include **/*.swift --non-strict
+./browserstack-a11y-scan-spm-fish.sh --include "**/*.swift" --include "**/*.xib" --include "**/*.storyboard"
 ```
 
 Xcode will now automatically run the accessibility scan during builds.
