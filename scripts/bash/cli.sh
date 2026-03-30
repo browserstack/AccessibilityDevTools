@@ -68,7 +68,7 @@ EOF
 
 a11y_scan() {
   if [[ -z "$EXTRA_ARGS" ]]; then
-    EXTRA_ARGS="--include **/*.swift"
+    EXTRA_ARGS="--include **/*.swift --include **/*.xib --include **/*.storyboard"
   fi
   env -i HOME="$HOME" \
       XCODE_VERSION_ACTUAL="$XCODE_VERSION_ACTUAL"\
