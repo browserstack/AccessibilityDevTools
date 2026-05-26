@@ -100,10 +100,13 @@ private func parseOverride(urlString: String?) throws -> URL? {
     guard let urlString = urlString, !urlString.isEmpty else {
         return nil
     }
-    if let url = URL(string: urlString), let scheme = url.scheme, ["http", "https", "file"].contains(scheme.lowercased()) {
-        return url
+    guard let url = URL(string: urlString), let scheme = url.scheme else {
+        throw PluginError("Invalid download URL: \(urlString). Only HTTPS URLs are supported.")
     }
-    return URL(fileURLWithPath: urlString)
+    guard scheme.lowercased() == "https" else {
+        throw PluginError("Unsupported URL scheme '\(scheme)' in download URL. Only HTTPS is allowed.")
+    }
+    return url
 }
 
 private func sanitizeArguments(_ arguments: [String]) -> [String] {
@@ -199,33 +202,40 @@ private struct BrowserStackCLIDownloader {
             return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
         }
 
+        Diagnostics.remark("BrowserStackAccessibilityLint: Downloading CLI \(info.version)...")
+
+        // Download into a temporary directory to avoid TOCTOU races
+        let tempDirectory = cacheRoot.appendingPathComponent(".download-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempDirectory) }
+
+        #if os(Windows)
+        let archiveURL = tempDirectory.appendingPathComponent("browserstack-cli.zip")
+        try await download(from: info.resolvedURL, to: archiveURL)
+        Diagnostics.remark("BrowserStackAccessibilityLint: Extracting CLI \(info.version)...")
+        try unzip(archive: archiveURL, into: tempDirectory)
+        try? fileManager.removeItem(at: archiveURL)
+        #else
+        try extractWithBsdtar(from: info.resolvedURL, into: tempDirectory)
+        #endif
+
+        let locatedBinary = try locateExecutable(in: tempDirectory, preferredName: executableName)
+
+        // Atomically swap: remove old version dir, move temp into place
         if fileManager.fileExists(atPath: versionDirectory.path) {
             try fileManager.removeItem(at: versionDirectory)
         }
-        try fileManager.createDirectory(at: versionDirectory, withIntermediateDirectories: true)
+        try fileManager.moveItem(at: tempDirectory, to: versionDirectory)
 
-        Diagnostics.remark("BrowserStackAccessibilityLint: Downloading CLI \(info.version)...")
-
-        #if os(Windows)
-        let archiveURL = versionDirectory.appendingPathComponent("browserstack-cli.zip")
-        try await download(from: info.resolvedURL, to: archiveURL)
-        Diagnostics.remark("BrowserStackAccessibilityLint: Extracting CLI \(info.version)...")
-        try unzip(archive: archiveURL, into: versionDirectory)
-        try? fileManager.removeItem(at: archiveURL)
-        #else
-        try extractWithBsdtar(from: info.resolvedURL, into: versionDirectory)
-        #endif
-
-        let locatedBinary = try locateExecutable(in: versionDirectory, preferredName: executableName)
-        let finalBinaryURL: URL
-        if locatedBinary.lastPathComponent == executableName {
-            finalBinaryURL = locatedBinary
-        } else {
-            finalBinaryURL = expectedExecutableURL
-            if fileManager.fileExists(atPath: finalBinaryURL.path) {
-                try fileManager.removeItem(at: finalBinaryURL)
+        let finalBinaryURL = versionDirectory.appendingPathComponent(locatedBinary.lastPathComponent, isDirectory: false)
+        if locatedBinary.lastPathComponent != executableName {
+            let expectedURL = versionDirectory.appendingPathComponent(executableName, isDirectory: false)
+            if fileManager.fileExists(atPath: expectedURL.path) {
+                try fileManager.removeItem(at: expectedURL)
             }
-            try fileManager.moveItem(at: locatedBinary, to: finalBinaryURL)
+            try fileManager.moveItem(at: finalBinaryURL, to: expectedURL)
+            try ensureExecutablePermissions(at: expectedURL)
+            return BrowserStackCLIArtifact(version: info.version, executableURL: expectedURL)
         }
 
         try ensureExecutablePermissions(at: finalBinaryURL)
@@ -285,6 +295,8 @@ private struct BrowserStackCLIDownloader {
             let message = String(data: tarError.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             forwardExit(code: bsdtar.terminationStatus, message: message.isEmpty ? "bsdtar failed to extract BrowserStack CLI." : message)
         }
+
+        try validateExtractedSize(of: directory)
     }
 
     private func extractLocalArchive(at archiveURL: URL, into directory: URL) throws {
@@ -301,6 +313,11 @@ private struct BrowserStackCLIDownloader {
             throw PluginError("Failed to launch bsdtar: \(error.localizedDescription)")
         }
 
+        if process.terminationReason == .exit && process.terminationStatus == 0 {
+            try validateExtractedSize(of: directory)
+            return
+        }
+
         if process.terminationReason != .exit || process.terminationStatus != 0 {
             // Fall back to copying the file directly if it's already an executable.
             let message = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -312,6 +329,24 @@ private struct BrowserStackCLIDownloader {
                 try fileManager.copyItem(at: archiveURL, to: destination)
             } else {
                 forwardExit(code: process.terminationStatus, message: message.isEmpty ? "bsdtar failed to extract BrowserStack CLI." : message)
+            }
+        }
+    }
+
+    private func validateExtractedSize(of directory: URL, maxBytes: UInt64 = 100 * 1024 * 1024) throws {
+        var totalSize: UInt64 = 0
+        let enumerator = fileManager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        )
+        while let fileURL = enumerator?.nextObject() as? URL {
+            if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                totalSize += UInt64(size)
+                if totalSize > maxBytes {
+                    try? fileManager.removeItem(at: directory)
+                    throw PluginError("Extracted archive exceeds maximum allowed size (\(maxBytes / (1024 * 1024)) MB). Possible decompression bomb.")
+                }
             }
         }
     }
@@ -557,8 +592,13 @@ private func hardwareIdentifier() throws -> String {
 private func extractVersion(from url: URL) -> String? {
     let filename = url.deletingPathExtension().lastPathComponent
     if let range = filename.range(of: "-", options: .backwards) {
-        let version = filename[range.upperBound...]
-        return version.isEmpty ? nil : String(version)
+        let version = String(filename[range.upperBound...])
+        if version.isEmpty { return nil }
+        // Reject path traversal and non-semver characters
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-+"))
+        guard version.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
+        guard !version.contains("..") else { return nil }
+        return version
     }
     return nil
 }
