@@ -285,6 +285,8 @@ private struct BrowserStackCLIDownloader {
             let message = String(data: tarError.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             forwardExit(code: bsdtar.terminationStatus, message: message.isEmpty ? "bsdtar failed to extract BrowserStack CLI." : message)
         }
+
+        try validateExtractedSize(of: directory)
     }
 
     private func extractLocalArchive(at archiveURL: URL, into directory: URL) throws {
@@ -301,6 +303,11 @@ private struct BrowserStackCLIDownloader {
             throw PluginError("Failed to launch bsdtar: \(error.localizedDescription)")
         }
 
+        if process.terminationReason == .exit && process.terminationStatus == 0 {
+            try validateExtractedSize(of: directory)
+            return
+        }
+
         if process.terminationReason != .exit || process.terminationStatus != 0 {
             // Fall back to copying the file directly if it's already an executable.
             let message = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -312,6 +319,24 @@ private struct BrowserStackCLIDownloader {
                 try fileManager.copyItem(at: archiveURL, to: destination)
             } else {
                 forwardExit(code: process.terminationStatus, message: message.isEmpty ? "bsdtar failed to extract BrowserStack CLI." : message)
+            }
+        }
+    }
+
+    private func validateExtractedSize(of directory: URL, maxBytes: UInt64 = 100 * 1024 * 1024) throws {
+        var totalSize: UInt64 = 0
+        let enumerator = fileManager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        )
+        while let fileURL = enumerator?.nextObject() as? URL {
+            if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                totalSize += UInt64(size)
+                if totalSize > maxBytes {
+                    try? fileManager.removeItem(at: directory)
+                    throw PluginError("Extracted archive exceeds maximum allowed size (\(maxBytes / (1024 * 1024)) MB). Possible decompression bomb.")
+                }
             }
         }
     }
