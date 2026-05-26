@@ -96,16 +96,6 @@ EOF
           scan $EXTRA_ARGS
 }
 
-script_self_update() {
-  local remote_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh"
-
-  updated_script=$(curl -R -z "$SCRIPT_PATH" "$remote_url")
-  if [[ $updated_script =~ ^#! ]]; then
-    echo "$updated_script" > "$SCRIPT_PATH"
-  fi
-}
-
-script_self_update
 if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   register_git_hook
   exit 0
