@@ -89,21 +89,11 @@ a11y_scan() {
       $BINARY_PATH a11y $EXTRA_ARGS
 }
 
-script_self_update() {
-  local remote_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/cli.sh"
-
-  updated_script=$(curl -R -z "$SCRIPT_PATH" "$remote_url")
-  if [[ $updated_script =~ ^#! ]]; then
-    echo "$updated_script" > "$SCRIPT_PATH"
-  fi
-}
-
 download_binary() {
   curl -R -z "$BINARY_ZIP_PATH" -L "http://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH"
   bsdtar -xvf "$BINARY_ZIP_PATH" -O > "$BINARY_PATH" && chmod 0775 "$BINARY_PATH"
 }
 
-script_self_update
 if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   register_git_hook
   exit 0
