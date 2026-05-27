@@ -342,7 +342,7 @@ private struct BrowserStackCLIDownloader {
     private func defaultDownloadURL() throws -> URL {
         let os = try currentOSName()
         let arch = try currentArchName()
-        guard let url = URL(string: "http://api.browserstack.com/sdk/v1/download_cli?os=\(os)&os_arch=\(arch)") else {
+        guard let url = URL(string: "https://api.browserstack.com/sdk/v1/download_cli?os=\(os)&os_arch=\(arch)") else {
             throw PluginError("Failed to create download URL for \(os) \(arch).")
         }
         return url
