@@ -99,7 +99,7 @@ script_self_update() {
 }
 
 download_binary() {
-  curl -R -z "$BINARY_ZIP_PATH" -L "http://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH"
+  curl -R -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH"
   bsdtar -xvf "$BINARY_ZIP_PATH" -O > "$BINARY_PATH" && chmod 0775 "$BINARY_PATH"
 }
 
