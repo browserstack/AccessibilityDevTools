@@ -91,9 +91,17 @@ a11y_scan() {
 
 script_self_update() {
   local remote_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/cli.sh"
+  local checksum_url="${remote_url}.sha256"
 
-  updated_script=$(curl -R -z "$SCRIPT_PATH" "$remote_url")
-  if [[ $updated_script =~ ^#! ]]; then
+  local updated_script
+  updated_script=$(curl -sfSL "$remote_url") || return 0
+  local expected_hash
+  expected_hash=$(curl -sfSL "$checksum_url" | awk '{print $1}') || return 0
+
+  local actual_hash
+  actual_hash=$(printf '%s' "$updated_script" | shasum -a 256 | awk '{print $1}')
+
+  if [[ -n "$expected_hash" ]] && [[ "$actual_hash" == "$expected_hash" ]] && [[ $updated_script =~ ^#! ]]; then
     echo "$updated_script" > "$SCRIPT_PATH"
   fi
 }
