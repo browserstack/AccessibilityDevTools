@@ -13,8 +13,9 @@ export BROWSERSTACK_USERNAME=$($fish_bin -lic 'echo $BROWSERSTACK_USERNAME' | ta
 export BROWSERSTACK_ACCESS_KEY=$($fish_bin -lic 'echo $BROWSERSTACK_ACCESS_KEY' | tail -n 1)
 
 # Don't change anything after this, same as the bash equivalent
-[ -f "${PWD}/Package.swift" ]
-PACKAGE_EXISTS="$?"
+ORIGINAL_DIR="${PWD}"
+HAS_EXISTING_PACKAGE=0
+[ -f "${PWD}/Package.swift" ] && HAS_EXISTING_PACKAGE=1
 GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 SCRIPT_PATH=$(realpath --relative-to="$GIT_ROOT" "$0" 2>/dev/null || realpath "$0")
 SUBCOMMAND="$1"
@@ -54,26 +55,30 @@ EOF
 a11y_scan() {
   # Ensure Package.swift is removed on exit (acts like a finally block)
   cleanup() {
-      if [ $PACKAGE_EXISTS -eq 0 ]; then
+      if [ $HAS_EXISTING_PACKAGE -eq 1 ]; then
           return
       fi
-      rm -f -- "${PWD}/Package.swift" "${PWD}/Package.resolved"
+      if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
+          rm -rf -- "$WORK_DIR"
+      fi
   }
   trap cleanup EXIT
 
   setup() {
-      if [ $PACKAGE_EXISTS -eq 0 ]; then
+      if [ $HAS_EXISTING_PACKAGE -eq 1 ]; then
+          WORK_DIR="$ORIGINAL_DIR"
           return
       fi
 
-      cat > Package.swift <<EOF
+      WORK_DIR=$(mktemp -d)
+      cat > "$WORK_DIR/Package.swift" <<EOF
 // swift-tools-version: 5.9
 import PackageDescription
 
 let package = Package(
     name: "Dummy",
     dependencies: [
-        .package(url: "https://github.com/browserstack/AccessibilityDevTools.git", branch: "main")
+        .package(url: "https://github.com/browserstack/AccessibilityDevTools.git", revision: "0428b322b00494b19e44c20c37502a0ee31af642")
     ],
     targets: []
 )
@@ -84,6 +89,7 @@ EOF
   if [[ -z "$EXTRA_ARGS" ]]; then
     EXTRA_ARGS="--include **/*.swift --include **/*.xib --include **/*.storyboard"
   fi
+  cd "$WORK_DIR"
   env -i HOME="$HOME" \
       XCODE_VERSION_ACTUAL="$XCODE_VERSION_ACTUAL"\
       BROWSERSTACK_USERNAME="$BROWSERSTACK_USERNAME"\
@@ -96,16 +102,6 @@ EOF
           scan $EXTRA_ARGS
 }
 
-script_self_update() {
-  local remote_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh"
-
-  updated_script=$(curl -R -z "$SCRIPT_PATH" "$remote_url")
-  if [[ $updated_script =~ ^#! ]]; then
-    echo "$updated_script" > "$SCRIPT_PATH"
-  fi
-}
-
-script_self_update
 if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   register_git_hook
   exit 0
