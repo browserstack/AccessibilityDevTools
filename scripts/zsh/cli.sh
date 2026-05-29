@@ -99,8 +99,27 @@ script_self_update() {
 }
 
 download_binary() {
-  curl -R -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH"
-  bsdtar -xvf "$BINARY_ZIP_PATH" -O > "$BINARY_PATH" && chmod 0775 "$BINARY_PATH"
+  local max_compressed=104857600   # 100 MB cap on the compressed download
+  local max_decompressed=209715200 # 200 MB cap on the decompressed binary
+
+  curl --max-filesize "$max_compressed" -R -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH"
+
+  # Guard against a decompression bomb (DEVA11Y-484): head -c stops bsdtar (via SIGPIPE)
+  # once the decompressed output reaches the cap; pipefail surfaces that as a failure.
+  set -o pipefail
+  bsdtar -xvf "$BINARY_ZIP_PATH" -O | head -c "$max_decompressed" > "$BINARY_PATH"
+  local extract_status=$?
+  set +o pipefail
+
+  local extracted_size
+  extracted_size=$(wc -c < "$BINARY_PATH" 2>/dev/null || echo 0)
+  if [[ $extract_status -ne 0 || $extracted_size -ge $max_decompressed ]]; then
+    echo "BrowserStack CLI download failed or exceeds the maximum allowed size (200 MB). Aborting." >&2
+    rm -f "$BINARY_PATH"
+    exit 1
+  fi
+
+  chmod 0775 "$BINARY_PATH"
 }
 
 script_self_update
