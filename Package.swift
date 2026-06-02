@@ -3,6 +3,8 @@ import PackageDescription
 
 let package = Package(
     name: "AccessibilityDevTools",
+    // Matches the async URLSession APIs the downloader already used as a plugin.
+    platforms: [.macOS(.v12)],
     products: [
         .plugin(
             name: "a11y-scan",
@@ -10,6 +12,23 @@ let package = Package(
         )
     ],
     targets: [
+        // All download / extract / guard / run logic. Pure Foundation so it can be unit-tested.
+        .target(name: "BrowserStackCLIKit"),
+
+        // Thin executable the command plugin invokes (plugins can't link library targets).
+        .executableTarget(
+            name: "browserstack-accessibility-runner",
+            dependencies: ["BrowserStackCLIKit"]
+        ),
+
+        // Executable test harness (not XCTest, so it runs under Command Line Tools as well as
+        // Xcode/CI). Exercises the real BrowserStackCLIKit code against live bsdtar + bombs.
+        // Run with: swift run cli-kit-tests
+        .executableTarget(
+            name: "cli-kit-tests",
+            dependencies: ["BrowserStackCLIKit"]
+        ),
+
         .plugin(
             name: "a11y-scan",
             capability: .command(
@@ -24,7 +43,8 @@ let package = Package(
                     ),
                     .writeToPackageDirectory(reason: "Please allow writing to package directory for logging.")
                 ]
-            )
+            ),
+            dependencies: ["browserstack-accessibility-runner"]
         )
     ]
 )
