@@ -275,10 +275,8 @@ private struct BrowserStackCLIDownloader {
             throw PluginError("Unable to launch bsdtar: \(error.localizedDescription)")
         }
 
-        // bsdtar writes decompressed bytes straight to disk, so a cap on the curl→bsdtar
-        // pipe would only bound the *compressed* size — useless against a decompression
-        // bomb. Guard the *decompressed* footprint instead (DEVA11Y-484).
-        let limitState = enforceExtractionSizeLimit(on: bsdtar, extractingInto: directory)
+        // See the DEVA11Y-484 EXTRACTION GUARD block below for the rationale.
+        let limitState = startExtractionWatchdog(on: bsdtar, directory: directory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries)
 
         do {
             try curl.run()
@@ -292,9 +290,13 @@ private struct BrowserStackCLIDownloader {
         pipe.fileHandleForWriting.closeFile()
         bsdtar.waitUntilExit()
 
+        // Catch a bomb that completed within a single watchdog poll interval (fast disk).
+        if !limitState.exceeded, let reason = footprintExceeded(at: directory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries) {
+            limitState.markExceeded(reason)
+        }
         if limitState.exceeded {
             try? fileManager.removeItem(at: directory)
-            forwardExit(code: 1, message: "BrowserStack CLI archive exceeds the maximum allowed decompressed size of \(Self.maxDecompressedBytes / (1024 * 1024)) MB. Aborting to prevent disk exhaustion.")
+            forwardExit(code: 1, message: "BrowserStack CLI archive rejected: \(limitState.reason). Aborting to prevent disk exhaustion.")
         }
 
         if curl.terminationStatus != 0 {
@@ -308,39 +310,6 @@ private struct BrowserStackCLIDownloader {
         }
     }
 
-    /// Starts a background watchdog that terminates `bsdtar` if the decompressed footprint in
-    /// `directory` exceeds `maxDecompressedBytes`. Returns the shared state to inspect afterwards.
-    private func enforceExtractionSizeLimit(on bsdtar: Process, extractingInto directory: URL) -> ExtractionLimitState {
-        let state = ExtractionLimitState()
-        let watchdog = Thread {
-            while bsdtar.isRunning {
-                if Self.directorySize(at: directory) > Self.maxDecompressedBytes {
-                    state.markExceeded()
-                    bsdtar.terminate()
-                    break
-                }
-                Thread.sleep(forTimeInterval: 0.2)
-            }
-        }
-        watchdog.start()
-        return state
-    }
-
-    private static func directorySize(at url: URL) -> Int64 {
-        let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) else {
-            return 0
-        }
-        var total: Int64 = 0
-        for case let element as URL in enumerator {
-            let values = try? element.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-            if values?.isRegularFile == true, let size = values?.fileSize {
-                total += Int64(size)
-            }
-        }
-        return total
-    }
-
     private func extractLocalArchive(at archiveURL: URL, into directory: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -351,16 +320,20 @@ private struct BrowserStackCLIDownloader {
         let limitState: ExtractionLimitState
         do {
             try process.run()
-            // Decompressed-size guard (DEVA11Y-484): same rationale as the remote path.
-            limitState = enforceExtractionSizeLimit(on: process, extractingInto: directory)
+            // Decompressed-size/entry guard (DEVA11Y-484): same rationale as the remote path.
+            limitState = startExtractionWatchdog(on: process, directory: directory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries)
             process.waitUntilExit()
         } catch {
             throw PluginError("Failed to launch bsdtar: \(error.localizedDescription)")
         }
 
+        // Catch a bomb that completed within a single watchdog poll interval (fast disk).
+        if !limitState.exceeded, let reason = footprintExceeded(at: directory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries) {
+            limitState.markExceeded(reason)
+        }
         if limitState.exceeded {
             try? fileManager.removeItem(at: directory)
-            forwardExit(code: 1, message: "BrowserStack CLI archive exceeds the maximum allowed decompressed size of \(Self.maxDecompressedBytes / (1024 * 1024)) MB. Aborting to prevent disk exhaustion.")
+            forwardExit(code: 1, message: "BrowserStack CLI archive rejected: \(limitState.reason). Aborting to prevent disk exhaustion.")
         }
 
         if process.terminationReason != .exit || process.terminationStatus != 0 {
@@ -670,14 +643,30 @@ private func isAlpineLinux() -> Bool { false }
 
 // MARK: - Error
 
+// === DEVA11Y-484 EXTRACTION GUARD: shared block ===
+// This block is mirrored verbatim in
+//   scripts/test/swift-harness/Sources/ExtractionHarness/Guard.swift
+// so the integration harness exercises the real logic. scripts/test/check_drift.sh
+// fails CI if the two copies diverge. Edit both, or neither.
+//
+// Rationale: bsdtar writes decompressed bytes straight to disk, so a cap on the
+// curl→bsdtar pipe would only bound the *compressed* size — useless against a
+// decompression bomb. Instead we poll the destination directory while bsdtar runs
+// and terminate it if the decompressed footprint crosses a byte OR entry ceiling
+// (the entry ceiling stops a "millions of tiny files" bomb that stays small on disk).
+
 /// Thread-safe flag shared between the extraction watchdog and the main flow.
-private final class ExtractionLimitState {
+final class ExtractionLimitState {
     private let lock = NSLock()
     private var didExceed = false
+    private var why = ""
 
-    func markExceeded() {
+    func markExceeded(_ reason: String) {
         lock.lock()
-        didExceed = true
+        if !didExceed {
+            didExceed = true
+            why = reason
+        }
         lock.unlock()
     }
 
@@ -686,7 +675,64 @@ private final class ExtractionLimitState {
         defer { lock.unlock() }
         return didExceed
     }
+
+    var reason: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return why
+    }
 }
+
+/// Total bytes and entry count of all regular files under `url`.
+func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int) {
+    let fm = FileManager.default
+    guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) else {
+        return (0, 0)
+    }
+    var total: Int64 = 0
+    var count = 0
+    for case let element as URL in enumerator {
+        count += 1
+        let values = try? element.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        if values?.isRegularFile == true, let size = values?.fileSize {
+            total += Int64(size)
+        }
+    }
+    return (total, count)
+}
+
+/// Returns a rejection reason if the footprint under `directory` exceeds either ceiling.
+func footprintExceeded(at directory: URL, maxBytes: Int64, maxEntries: Int) -> String? {
+    let footprint = extractionFootprint(at: directory)
+    if footprint.bytes > maxBytes {
+        return "decompressed size exceeds \(maxBytes / (1024 * 1024)) MB"
+    }
+    if footprint.entries > maxEntries {
+        return "archive contains more than \(maxEntries) entries"
+    }
+    return nil
+}
+
+/// Starts a background watchdog that terminates `process` (bsdtar) if the decompressed
+/// footprint in `directory` exceeds the byte or entry ceiling. The watchdog bounds peak
+/// disk use during a large/slow bomb; callers MUST also run `footprintExceeded` once the
+/// process exits, to catch a fast bomb that finished within a single poll interval.
+func startExtractionWatchdog(on process: Process, directory: URL, maxBytes: Int64, maxEntries: Int) -> ExtractionLimitState {
+    let state = ExtractionLimitState()
+    let watchdog = Thread {
+        while process.isRunning {
+            if let reason = footprintExceeded(at: directory, maxBytes: maxBytes, maxEntries: maxEntries) {
+                state.markExceeded(reason)
+                process.terminate()
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+    }
+    watchdog.start()
+    return state
+}
+// === END DEVA11Y-484 EXTRACTION GUARD ===
 
 private struct PluginError: Error, CustomStringConvertible {
     let message: String
