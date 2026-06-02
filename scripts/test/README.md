@@ -1,20 +1,28 @@
 # DEVA11Y-484 — decompression-bomb guard regression tests
 
-Real, local integration tests for the size/entry guards added to the CLI download path.
-**No mocks** — every test runs actual `curl`, `bsdtar`, `head`, and (for the plugin) real
-`Process`/watchdog logic against crafted archives served from a local HTTP server.
+Real, local tests for the size/entry guards on the CLI download path. **No mocks** — every
+test runs actual `bsdtar`/`curl`/`head` against crafted archives.
+
+There are two layers:
+
+1. **Swift unit tests** (`Sources/cli-kit-tests`, run via `swift run cli-kit-tests`) exercise
+   the **real shipped library** `BrowserStackCLIKit` — the same code the plugin runs. The
+   plugin is a thin shim that invokes the `browserstack-accessibility-runner` executable,
+   which calls this library (SwiftPM command plugins can't link a library target, so this is
+   how the shipped code stays directly testable — no mirror, no drift check needed).
+2. **Shell integration tests** (`test_shell_extraction.sh`) run the real `download_binary`
+   from `scripts/{bash,zsh,fish}/cli.sh`.
 
 ## Run everything
 
 ```bash
-scripts/test/run_tests.sh
+scripts/test/run_tests.sh        # unit tests + shell tests
+swift run cli-kit-tests          # just the Swift unit tests
 ```
 
-This generates fixtures (first run only), checks guard sync, then runs the shell and
-Swift suites. Exit code is non-zero if anything fails.
-
-Requirements: `bash`, `curl`, `bsdtar` (libarchive), `python3`, and the Swift toolchain
-(`swift`). All present on the macOS CI image.
+Requirements: the Swift toolchain (`swift`), `bash`, `curl`, `bsdtar` (libarchive), `python3`.
+All present on the macOS CI image and under Command Line Tools (no Xcode/XCTest required —
+the unit tests are a plain executable, not an XCTest bundle).
 
 ## What is covered
 
@@ -31,52 +39,33 @@ Requirements: `bash`, `curl`, `bsdtar` (libarchive), `python3`, and the Swift to
 All fixtures are **bounded** (nothing decompresses beyond ~400 MB) so a regressed guard
 can never exhaust the disk during a test run; bomb tests additionally use a small byte cap.
 
-## Why a "mirror" for the Swift side
-
-SwiftPM **command plugins cannot be imported by a test target** (they run sandboxed and
-compile only their own sources), so the plugin's guard logic cannot be unit-tested
-directly. Instead:
-
-- The guard lives in a clearly-marked block in
-  `Plugins/BrowserStackAccessibilityLint/BrowserStackAccessibilityLint.swift`
-  (`=== DEVA11Y-484 EXTRACTION GUARD ===`).
-- `swift-harness/Sources/ExtractionHarness/Guard.swift` is a **verbatim mirror** of that
-  block, compiled into a small executable that drives real `curl`/`bsdtar`.
-- `check_drift.sh` diffs the two and **fails if they diverge**, so the mirror can never
-  silently rot. If you edit the guard, copy the block into both — the drift check enforces it.
+The Swift unit tests now drive the **real** library code (`extractLocalArchive`,
+`extractRemoteArchive`, `startExtractionWatchdog`, `locateExecutable`, parsing) directly —
+there is no mirror and no drift check to maintain. The plugin → runner → library chain is
+additionally verified end-to-end from a consumer package (a real download + extract + run).
 
 ## Known limitations (read before trusting this blindly)
 
-- **The cap is soft, not exact.** The Swift watchdog polls the extraction directory
-  (every 50 ms) and kills `bsdtar` once the footprint crosses the limit, so peak disk use
-  is roughly `cap + (poll interval × disk write rate)`. Measured: a 200 MB cap peaks around
-  ~230–300 MB on a fast NVMe; a 2 GB bomb is killed at ~224 MB (see `test_large_bomb.sh`).
-  The goal is preventing disk *exhaustion* by a multi-GB/TB bomb — not enforcing an exact
-  byte count. The shell `-O | head -c` path, by contrast, is a hard byte cap.
-- **The Swift tests run a mirror, not the compiled plugin.** `check_drift.sh` guarantees the
-  guard *block* matches, but the harness has its own copies of the `extractRemote/extractLocal`
-  call sites, which are NOT drift-checked. A bug in how the plugin wires the guard into those
-  call sites would not be caught here (the plugin edits are typecheck-only). Eliminating this
-  needs the larger refactor of extracting the logic into an importable target.
-- **`locateExecutable`'s 10k-entry cap is not exercised by the harness** — the watchdog's
-  entry ceiling (which IS tested) is the primary defense; the `locateExecutable` cap is
-  secondary/defense-in-depth and currently typecheck-only.
+- **The cap is soft, not exact.** The watchdog polls the extraction directory (every 50 ms)
+  and kills `bsdtar` once the footprint crosses the limit, so peak disk use is roughly
+  `cap + (poll interval × disk write rate)`. Measured: a 200 MB cap peaks ~230–300 MB on a
+  fast NVMe; a 400 MB bomb under a 20 MB cap is killed at ~100 MB; a 2 GB bomb is killed at
+  ~224 MB. The goal is preventing disk *exhaustion* by a multi-GB/TB bomb, not enforcing an
+  exact byte count. The shell `-O | head -c` path is a hard byte cap.
 - **Windows protection is post-hoc only.** The macOS/Linux `bsdtar` paths bound peak disk
   mid-stream via the watchdog. The Windows `Expand-Archive` path has no streaming guard; it
   gets only the platform-agnostic post-extraction backstop (it rejects + cleans up a bomb
-  before the binary is used, but the bomb can momentarily expand to its full size on disk
-  first). Windows also can't run on the macOS CI image, so it is verified by typecheck only.
-  A streaming guard for Windows is a follow-up.
+  before the binary is used, but the bomb can momentarily expand to full size on disk first).
+  Windows can't run on the macOS CI image, so it is verified by typecheck only. A streaming
+  guard for Windows is a follow-up.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `run_tests.sh` | Orchestrator — run this |
-| `make_fixtures.sh` | Generates the bounded test archives into `fixtures/` (gitignored) |
-| `check_drift.sh` | Fails if the plugin guard and harness mirror diverge |
+| `../../Sources/cli-kit-tests/main.swift` | Swift unit tests against the real `BrowserStackCLIKit` |
+| `run_tests.sh` | Orchestrator — runs the unit tests + the shell tests |
+| `make_fixtures.sh` | Generates the bounded shell-test archives into `fixtures/` (gitignored) |
 | `test_shell_extraction.sh` | Runs the real `download_binary` from all 3 wrappers |
-| `test_swift_extraction.sh` | Runs the Swift guard via the mirror harness |
 | `lib/assert.sh` | Assertion helpers + local server management |
 | `_shim/curl` | Test-only curl shim; redirects the hardcoded URL to the local server |
-| `swift-harness/` | Standalone SwiftPM executable mirroring the guard |

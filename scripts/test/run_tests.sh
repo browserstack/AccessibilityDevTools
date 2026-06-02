@@ -1,32 +1,23 @@
 #!/usr/bin/env bash
-# DEVA11Y-484 extraction-guard regression suite.
-# Generates fixtures (if missing), verifies the plugin/harness guard is in sync, then
-# runs the real-process integration tests for both the shell wrappers and the Swift plugin.
+# DEVA11Y-484 decompression-bomb guard — full regression suite.
+#   1. Swift unit tests against the REAL BrowserStackCLIKit library (swift run cli-kit-tests)
+#   2. Shell wrapper integration tests for scripts/{bash,zsh,fish}/cli.sh
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
 rc=0
 
 echo "════════════════════════════════════════════════════════"
 echo " DEVA11Y-484 decompression-bomb guard — regression suite"
 echo "════════════════════════════════════════════════════════"
 
-if [ ! -f "$HERE/fixtures/legit.tar.gz" ] || [ ! -f "$HERE/fixtures/oversized-download.bin" ]; then
-  echo "▶ Generating fixtures..."
-  bash "$HERE/make_fixtures.sh" || exit 1
-fi
-
-echo; echo "▶ Drift check (plugin guard vs harness mirror)"
-bash "$HERE/check_drift.sh" || rc=1
+echo; echo "▶ Swift library unit tests (real bsdtar + crafted bombs)"
+( cd "$REPO" && swift run cli-kit-tests ) || rc=1
 
 echo; echo "▶ Shell wrapper tests (bash / zsh / fish)"
+if [ ! -f "$HERE/fixtures/legit.tar.gz" ]; then bash "$HERE/make_fixtures.sh" || exit 1; fi
 bash "$HERE/test_shell_extraction.sh" || rc=1
-
-echo; echo "▶ Swift plugin guard tests (via mirror harness)"
-bash "$HERE/test_swift_extraction.sh" || rc=1
-
-echo; echo "▶ Large-bomb deep test (opt-in: DEVA11Y_DEEP=1)"
-bash "$HERE/test_large_bomb.sh" || rc=1
 
 echo
 if [ "$rc" -eq 0 ]; then
