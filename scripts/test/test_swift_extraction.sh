@@ -47,10 +47,16 @@ assert_eq "$(jget "$OUT" bsdtarStatus)" "0" "legit: bsdtar exits 0"
 if [ -f "$DEST/browserstack-cli" ]; then ok "legit: binary extracted"; else bad "legit: binary missing"; fi
 "$DEST/browserstack-cli" >/dev/null 2>&1; assert_status $? 0 "legit: extracted binary runs"
 
-# 2. Decompression bomb (remote), small byte cap: flagged, terminated, dir removed.
+# 2. Decompression bomb (remote), small byte cap: flagged, terminated mid-stream, removed.
+#    The 400 MB fixture is ~8x the 50 MB cap, so a working LIVE watchdog must SIGTERM
+#    bsdtar (status 15) well before it finishes — asserting that catches a regression
+#    where only the post-extraction check works (which would let a huge bomb fill the disk).
 run_remote "bomb.tar.gz" "$CAP_SMALL" "$ENTRIES"
 assert_eq "$(jget "$OUT" exceeded)" "True" "bomb: flagged as exceeded"
 assert_contains "$(jget "$OUT" reason)" "decompressed size" "bomb: reason cites size"
+assert_eq "$(jget "$OUT" bsdtarStatus)" "15" "bomb: bsdtar SIGTERM'd mid-stream (live watchdog fired)"
+bomb_peak_mb=$(( $(jget "$OUT" bytes) / MB ))
+assert_le "$bomb_peak_mb" 350 "bomb: peak disk bounded below the 400 MB fixture (=${bomb_peak_mb}MB)"
 assert_absent "$DEST" "bomb: extraction dir removed"
 
 # 3. Entry-count bomb (20k tiny files), generous byte cap: flagged on entries.

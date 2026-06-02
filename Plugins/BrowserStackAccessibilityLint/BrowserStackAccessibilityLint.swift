@@ -225,6 +225,15 @@ private struct BrowserStackCLIDownloader {
         try extractWithBsdtar(from: info.resolvedURL, into: versionDirectory)
         #endif
 
+        // Platform-agnostic backstop (DEVA11Y-484). The bsdtar paths already abort mid-stream
+        // via the watchdog; this also covers the Windows Expand-Archive path, which has no
+        // streaming guard — it can't bound peak disk during extraction, but it rejects and
+        // cleans up a bomb before the binary is ever used.
+        if let reason = footprintExceeded(at: versionDirectory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries) {
+            try? fileManager.removeItem(at: versionDirectory)
+            forwardExit(code: 1, message: "BrowserStack CLI archive rejected: \(reason). Aborting to prevent disk exhaustion.")
+        }
+
         let locatedBinary = try locateExecutable(in: versionDirectory, preferredName: executableName)
         let finalBinaryURL: URL
         if locatedBinary.lastPathComponent == executableName {
@@ -714,9 +723,14 @@ func footprintExceeded(at directory: URL, maxBytes: Int64, maxEntries: Int) -> S
 }
 
 /// Starts a background watchdog that terminates `process` (bsdtar) if the decompressed
-/// footprint in `directory` exceeds the byte or entry ceiling. The watchdog bounds peak
-/// disk use during a large/slow bomb; callers MUST also run `footprintExceeded` once the
-/// process exits, to catch a fast bomb that finished within a single poll interval.
+/// footprint in `directory` exceeds the byte or entry ceiling.
+///
+/// This is a SOFT ceiling: bsdtar can write up to one poll interval's worth of data past
+/// the limit before it is killed, so peak disk use is roughly `maxBytes + (pollInterval ×
+/// disk write rate)`. The goal is to prevent disk *exhaustion* by a multi-GB/TB bomb, not
+/// to enforce an exact byte count. The interval is kept short to bound the overshoot.
+/// Callers MUST also run `footprintExceeded` once the process exits, to catch a fast bomb
+/// that finished within a single poll interval.
 func startExtractionWatchdog(on process: Process, directory: URL, maxBytes: Int64, maxEntries: Int) -> ExtractionLimitState {
     let state = ExtractionLimitState()
     let watchdog = Thread {
@@ -726,7 +740,7 @@ func startExtractionWatchdog(on process: Process, directory: URL, maxBytes: Int6
                 process.terminate()
                 break
             }
-            Thread.sleep(forTimeInterval: 0.2)
+            Thread.sleep(forTimeInterval: 0.05)
         }
     }
     watchdog.start()

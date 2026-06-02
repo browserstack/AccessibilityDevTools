@@ -25,6 +25,9 @@ bash "$HERE/test_shell_extraction.sh" || rc=1
 echo; echo "▶ Swift plugin guard tests (via mirror harness)"
 bash "$HERE/test_swift_extraction.sh" || rc=1
 
+echo; echo "▶ Large-bomb deep test (opt-in: DEVA11Y_DEEP=1)"
+bash "$HERE/test_large_bomb.sh" || rc=1
+
 echo
 if [ "$rc" -eq 0 ]; then
   echo "✅ DEVA11Y-484 suite: ALL GREEN"
