@@ -19,8 +19,7 @@ let package = Package(
                 ),
                 permissions: [
                     .allowNetworkConnections(
-                        // scope: .all(ports: []),
-                        scope: .all(),
+                        scope: .all(ports: [80, 443]),
                         reason: "Please allow network connection permission to authenticate and run accessibility rules."
                     ),
                     .writeToPackageDirectory(reason: "Please allow writing to package directory for logging.")

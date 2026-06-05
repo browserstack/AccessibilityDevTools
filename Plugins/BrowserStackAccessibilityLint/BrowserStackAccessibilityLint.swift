@@ -100,10 +100,13 @@ private func parseOverride(urlString: String?) throws -> URL? {
     guard let urlString = urlString, !urlString.isEmpty else {
         return nil
     }
-    if let url = URL(string: urlString), let scheme = url.scheme, ["http", "https", "file"].contains(scheme.lowercased()) {
-        return url
+    guard let url = URL(string: urlString), let scheme = url.scheme else {
+        throw PluginError("Invalid download URL: \(urlString). Only HTTPS URLs are supported.")
     }
-    return URL(fileURLWithPath: urlString)
+    guard scheme.lowercased() == "https" else {
+        throw PluginError("Unsupported URL scheme '\(scheme)' in download URL. Only HTTPS is allowed.")
+    }
+    return url
 }
 
 private func sanitizeArguments(_ arguments: [String]) -> [String] {
@@ -339,7 +342,7 @@ private struct BrowserStackCLIDownloader {
     private func defaultDownloadURL() throws -> URL {
         let os = try currentOSName()
         let arch = try currentArchName()
-        guard let url = URL(string: "http://api.browserstack.com/sdk/v1/download_cli?os=\(os)&os_arch=\(arch)") else {
+        guard let url = URL(string: "https://api.browserstack.com/sdk/v1/download_cli?os=\(os)&os_arch=\(arch)") else {
             throw PluginError("Failed to create download URL for \(os) \(arch).")
         }
         return url
