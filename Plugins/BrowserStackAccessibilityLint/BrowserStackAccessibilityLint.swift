@@ -560,8 +560,13 @@ private func hardwareIdentifier() throws -> String {
 private func extractVersion(from url: URL) -> String? {
     let filename = url.deletingPathExtension().lastPathComponent
     if let range = filename.range(of: "-", options: .backwards) {
-        let version = filename[range.upperBound...]
-        return version.isEmpty ? nil : String(version)
+        let version = String(filename[range.upperBound...])
+        if version.isEmpty { return nil }
+        // Reject path traversal and non-semver characters
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-+"))
+        guard version.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
+        guard !version.contains("..") else { return nil }
+        return version
     }
     return nil
 }
