@@ -1,4 +1,5 @@
 #!/usr/bin/env bash -il
+SCRIPT_VERSION="v1.0.0"
 
 export PATH="$PATH:/opt/homebrew/bin"
 # Shell specific
@@ -97,12 +98,42 @@ EOF
 }
 
 script_self_update() {
-  local remote_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh"
+  local repo_base="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools"
+  local version_url="${repo_base}/refs/heads/main/scripts/latest-version.txt"
+  local script_rel_path="fish/spm.sh"
 
-  updated_script=$(curl -R -z "$SCRIPT_PATH" "$remote_url")
-  if [[ $updated_script =~ ^#! ]]; then
-    echo "$updated_script" > "$SCRIPT_PATH"
+  # Fetch remote version (lightweight metadata from main, not executable code)
+  local remote_version
+  remote_version=$(curl -fsSL --max-time 10 "$version_url" 2>/dev/null | tr -d '[:space:]')
+  if [[ -z "$remote_version" || "$remote_version" == "$SCRIPT_VERSION" ]]; then
+    return 0
   fi
+
+  # Fetch script and checksums from immutable tagged ref
+  local tag_base="${repo_base}/refs/tags/${remote_version}/scripts"
+  local tmp_script tmp_sums
+  tmp_script=$(mktemp)
+  tmp_sums=$(mktemp)
+  trap 'rm -f "$tmp_script" "$tmp_sums"' RETURN
+
+  if ! curl -fsSL --max-time 30 "${tag_base}/${script_rel_path}" -o "$tmp_script" 2>/dev/null; then
+    return 0
+  fi
+  if ! curl -fsSL --max-time 10 "${tag_base}/SHA256SUMS" -o "$tmp_sums" 2>/dev/null; then
+    return 0
+  fi
+
+  # Verify SHA-256 checksum
+  local expected actual
+  expected=$(grep "  ${script_rel_path}$" "$tmp_sums" | cut -d' ' -f1)
+  actual=$(shasum -a 256 "$tmp_script" | cut -d' ' -f1)
+  if [[ -z "$expected" || "$actual" != "$expected" ]]; then
+    echo "[self-update] WARNING: Checksum verification failed for ${script_rel_path}. Update aborted." >&2
+    return 1
+  fi
+
+  cp "$tmp_script" "$0"
+  echo "[self-update] Updated to ${remote_version}." >&2
 }
 
 script_self_update
