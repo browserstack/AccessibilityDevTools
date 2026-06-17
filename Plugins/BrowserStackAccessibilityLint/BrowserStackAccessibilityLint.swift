@@ -582,6 +582,23 @@ private func isAlpineLinux() -> Bool {
 private func isAlpineLinux() -> Bool { false }
 #endif
 
+// MARK: - RBAC capability gating (ADR-0025)
+
+// The headless CLI performs all WebSocket work — authentication, the
+// connect/profile/handshake exchange (where the server ships the
+// `capabilities` set + `effectiveRole`), and capability-gating of
+// lint/scan/set-config. This SPM plugin is a thin wrapper that downloads
+// and invokes that CLI as a subprocess, so it has no WebSocket message-
+// decoding path and no Codable response model of its own to gate on:
+// capability decisions are read by the CLI from the server's capability set,
+// never re-encoded here. The one RBAC signal the wrapper sees is the CLI's
+// exit code. `browserstack-cli` exits `PERMISSION_DENIED` (3) on a denied
+// action (mirrors ExitCodes.PERMISSION_DENIED in the headless CLI) and has
+// already written the role-aware "Permission denied: …" detail to stderr.
+// Pre-RBAC CLIs (rollout gated by LINTER_RBAC_ENFORCEMENT_ENABLED on the
+// server) never emit this code, so the default path is unchanged.
+private let browserstackCLIPermissionDeniedExitCode: Int32 = 3
+
 // MARK: - CLI invocation
 
     private func runCLI(executableURL: URL, arguments: [String], workingDirectory: PackagePlugin.Path) async throws {
@@ -601,6 +618,17 @@ private func isAlpineLinux() -> Bool { false }
         }
 
         let status = process.terminationStatus
+        if status == browserstackCLIPermissionDeniedExitCode {
+            // Surface the RBAC denial as a clear, role-aware outcome rather than
+            // a generic failure. The CLI has already printed the specific
+            // "Permission denied: …" reason to stderr; preserve its exit code so
+            // CI and the SPM build phase can distinguish a denial from a lint
+            // failure (exit 1) or a tooling error (exit 2).
+            forwardExit(
+                code: status,
+                message: "BrowserStack Accessibility: your account's role is not permitted to run this action. See the \"Permission denied\" detail above, or contact your workspace admin to request access."
+            )
+        }
         guard status == 0 else {
             forwardExit(code: status, message: "")
         }
