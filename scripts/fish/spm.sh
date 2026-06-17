@@ -73,7 +73,10 @@ import PackageDescription
 let package = Package(
     name: "Dummy",
     dependencies: [
-        .package(url: "https://github.com/browserstack/AccessibilityDevTools.git", branch: "main")
+        // DEVA11Y-477 / F-005: pin to an immutable revision instead of a mutable
+        // branch HEAD. No release tags exist yet; this is the current origin/main
+        // SHA. Bump to a release tag (.exact("x.y.z")) once tags are published.
+        .package(url: "https://github.com/browserstack/AccessibilityDevTools.git", revision: "db817c37cf74cba47e2fef535f53a35bfc88ec6a")
     ],
     targets: []
 )
@@ -96,16 +99,68 @@ EOF
           scan $EXTRA_ARGS
 }
 
-script_self_update() {
-  local remote_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/fish/spm.sh"
+# Pinned, immutable git revision the self-update is allowed to fetch from.
+# DEVA11Y-478: never fetch executable code from a mutable branch HEAD.
+# Bump this (and the published .sha256 sidecars) on every release.
+SELF_UPDATE_REF="db817c37cf74cba47e2fef535f53a35bfc88ec6a"
+SELF_UPDATE_RELPATH="scripts/fish/spm.sh"
 
-  updated_script=$(curl -R -z "$SCRIPT_PATH" "$remote_url")
-  if [[ $updated_script =~ ^#! ]]; then
-    echo "$updated_script" > "$SCRIPT_PATH"
+# DEVA11Y-478 / F-006: self-update is OPT-IN (run with `--self-update`),
+# fetches from a pinned revision (not a mutable branch), verifies a SHA-256
+# checksum before use, and atomically replaces the script instead of
+# overwriting the currently-running file in place.
+script_self_update() {
+  local base_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/${SELF_UPDATE_REF}/${SELF_UPDATE_RELPATH}"
+  local tmp_dir tmp_script tmp_sum expected_sum actual_sum
+
+  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/bs-a11y-selfupdate.XXXXXX") || {
+    echo "Self-update: failed to create temp dir." >&2
+    return 1
+  }
+  # shellcheck disable=SC2064
+  trap "rm -rf -- '${tmp_dir}'" RETURN
+  tmp_script="${tmp_dir}/spm.sh"
+  tmp_sum="${tmp_dir}/spm.sh.sha256"
+
+  if ! curl -fsSL "$base_url" -o "$tmp_script"; then
+    echo "Self-update: failed to download script from pinned revision." >&2
+    return 1
+  fi
+  if ! curl -fsSL "${base_url}.sha256" -o "$tmp_sum"; then
+    echo "Self-update: failed to download checksum; aborting (integrity unverifiable)." >&2
+    return 1
+  fi
+
+  if ! head -c2 "$tmp_script" | grep -q '^#!'; then
+    echo "Self-update: downloaded file is not a script; aborting." >&2
+    return 1
+  fi
+
+  # Published sidecar is "<sha256>  <filename>"; take the first field.
+  expected_sum=$(awk '{print $1; exit}' "$tmp_sum")
+  actual_sum=$(shasum -a 256 "$tmp_script" | awk '{print $1}')
+  if [[ -z "$expected_sum" || "$expected_sum" != "$actual_sum" ]]; then
+    echo "Self-update: checksum mismatch; refusing to apply." >&2
+    echo "  expected: ${expected_sum:-<empty>}" >&2
+    echo "  actual:   ${actual_sum}" >&2
+    return 1
+  fi
+
+  chmod 0755 "$tmp_script"
+  # Atomic replace: never overwrite the running script in place.
+  if mv -f "$tmp_script" "$SCRIPT_PATH"; then
+    echo "Self-update: updated ${SCRIPT_PATH} to pinned revision ${SELF_UPDATE_REF}."
+  else
+    echo "Self-update: failed to replace ${SCRIPT_PATH}." >&2
+    return 1
   fi
 }
 
-script_self_update
+if [[ $SUBCOMMAND == "--self-update" ]]; then
+  script_self_update
+  exit $?
+fi
+
 if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   register_git_hook
   exit 0
