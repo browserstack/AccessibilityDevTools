@@ -202,37 +202,71 @@ private struct BrowserStackCLIDownloader {
             return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
         }
 
-        if fileManager.fileExists(atPath: versionDirectory.path) {
-            try fileManager.removeItem(at: versionDirectory)
-        }
-        try fileManager.createDirectory(at: versionDirectory, withIntermediateDirectories: true)
+        // Extract into a per-invocation staging directory so that concurrent plugin
+        // invocations cannot corrupt each other's binary state. Once extraction
+        // completes we atomically move the staging directory into the final
+        // version directory. If the move fails because another invocation already
+        // published the version directory, we treat that instance as the winner and
+        // read the existing binary instead (see DEVA11Y-482 / F-013).
+        let stagingDirectory = cacheRoot.appendingPathComponent(
+            "\(info.version).tmp.\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? fileManager.removeItem(at: stagingDirectory) }
+
+        try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
 
         Diagnostics.remark("BrowserStackAccessibilityLint: Downloading CLI \(info.version)...")
 
         #if os(Windows)
-        let archiveURL = versionDirectory.appendingPathComponent("browserstack-cli.zip")
+        let archiveURL = stagingDirectory.appendingPathComponent("browserstack-cli.zip")
         try await download(from: info.resolvedURL, to: archiveURL)
         Diagnostics.remark("BrowserStackAccessibilityLint: Extracting CLI \(info.version)...")
-        try unzip(archive: archiveURL, into: versionDirectory)
+        try unzip(archive: archiveURL, into: stagingDirectory)
         try? fileManager.removeItem(at: archiveURL)
         #else
-        try extractWithBsdtar(from: info.resolvedURL, into: versionDirectory)
+        try extractWithBsdtar(from: info.resolvedURL, into: stagingDirectory)
         #endif
 
-        let locatedBinary = try locateExecutable(in: versionDirectory, preferredName: executableName)
-        let finalBinaryURL: URL
-        if locatedBinary.lastPathComponent == executableName {
-            finalBinaryURL = locatedBinary
-        } else {
-            finalBinaryURL = expectedExecutableURL
-            if fileManager.fileExists(atPath: finalBinaryURL.path) {
-                try fileManager.removeItem(at: finalBinaryURL)
+        // Normalize the extracted layout inside the staging directory so the
+        // executable lives at <staging>/<executableName>.
+        let stagedBinary = try locateExecutable(in: stagingDirectory, preferredName: executableName)
+        let stagedExecutableURL = stagingDirectory.appendingPathComponent(executableName, isDirectory: false)
+        if stagedBinary.path != stagedExecutableURL.path {
+            if fileManager.fileExists(atPath: stagedExecutableURL.path) {
+                try fileManager.removeItem(at: stagedExecutableURL)
             }
-            try fileManager.moveItem(at: locatedBinary, to: finalBinaryURL)
+            try fileManager.moveItem(at: stagedBinary, to: stagedExecutableURL)
+        }
+        try ensureExecutablePermissions(at: stagedExecutableURL)
+
+        // Atomically publish the staged directory into place. moveItem throws if the
+        // destination already exists, which means another concurrent invocation won
+        // the race — fall back to reading the published binary.
+        do {
+            if forceDownload, fileManager.fileExists(atPath: versionDirectory.path) {
+                // Caller explicitly requested a fresh download. Replace any existing
+                // version directory atomically via a swap through a temp location.
+                let obsoleteDirectory = cacheRoot.appendingPathComponent(
+                    "\(info.version).old.\(UUID().uuidString)",
+                    isDirectory: true
+                )
+                try? fileManager.moveItem(at: versionDirectory, to: obsoleteDirectory)
+                defer { try? fileManager.removeItem(at: obsoleteDirectory) }
+                try fileManager.moveItem(at: stagingDirectory, to: versionDirectory)
+            } else {
+                try fileManager.moveItem(at: stagingDirectory, to: versionDirectory)
+            }
+        } catch {
+            // Another invocation already populated the version directory. If its
+            // binary is present and executable, use it; otherwise surface the error.
+            if fileManager.isExecutableFile(atPath: expectedExecutableURL.path) {
+                return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
+            }
+            throw error
         }
 
-        try ensureExecutablePermissions(at: finalBinaryURL)
-        return BrowserStackCLIArtifact(version: info.version, executableURL: finalBinaryURL)
+        return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
     }
 
 #if !os(Windows)
