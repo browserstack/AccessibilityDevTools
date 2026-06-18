@@ -1,0 +1,60 @@
+# XcodeGen spec for the Xcode-app integration harness.
+#
+# Generate the project with:
+#   brew install xcodegen   # if not already installed
+#   xcodegen generate
+#
+# This produces A11yScanDemoApp.xcodeproj. The app target runs the BrowserStack
+# `a11y-scan` command plugin via a pre-compile build phase (the official Xcode
+# integration), so an accessibility scan runs on every build.
+name: A11yScanDemoApp
+options:
+  bundleIdPrefix: com.browserstack.a11yscan
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    # Required so the scan build phase can write the CLI cache to ~/.cache.
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  A11yScanDemoApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.browserstack.a11yscan.demo
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+    preBuildScripts:
+      - name: BrowserStack Accessibility Linter
+        # Runs the a11y-scan command plugin over Sources/ before compilation.
+        # --non-strict keeps local/CI builds green even when issues are found;
+        # drop it to fail the build on accessibility violations.
+        script: |
+          "${SRCROOT}/scripts/run-a11y-scan.sh" --non-strict
+        basedOnDependencyAnalysis: false
+
+  A11yScanDemoAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: A11yScanDemoApp
+
+schemes:
+  A11yScanDemoApp:
+    build:
+      targets:
+        A11yScanDemoApp: all
+    test:
+      targets:
+        - A11yScanDemoAppTests
