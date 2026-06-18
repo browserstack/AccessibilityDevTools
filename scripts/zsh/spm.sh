@@ -98,19 +98,39 @@ EOF
           scan $EXTRA_ARGS
 }
 
-# Pinned, immutable git revision the self-update is allowed to fetch from.
-# DEVA11Y-478: never fetch executable code from a mutable branch HEAD.
-# Bump this (and the published .sha256 sidecars) on every release.
-SELF_UPDATE_REF="db817c37cf74cba47e2fef535f53a35bfc88ec6a"
+# Self-update tracks the latest launcher on `main` so users always run the
+# newest version. DEVA11Y-475/477/478: we deliberately follow main HEAD rather
+# than a pinned revision (per maintainer intent: always take the latest).
+# Hardening retained from the pinning work: download to a temp dir, verify a
+# SHA-256 sidecar (a download-integrity check, NOT an authenticity signature --
+# script and checksum share one origin), sanity-check the shebang, then
+# atomically replace the on-disk script. Keep scripts/zsh/spm.sh.sha256 on main in
+# sync with this file (regenerate on every change) or updates will abort.
+SELF_UPDATE_BRANCH="main"
+readonly SELF_UPDATE_BRANCH
 SELF_UPDATE_RELPATH="scripts/zsh/spm.sh"
+readonly SELF_UPDATE_RELPATH
 
-# DEVA11Y-478 / F-006: self-update is OPT-IN (run with `--self-update`),
-# fetches from a pinned revision (not a mutable branch), verifies a SHA-256
-# checksum before use, and atomically replaces the script instead of
-# overwriting the currently-running file in place.
+# sha256 with a portable fallback: GNU `sha256sum` (Linux) or `shasum -a 256`
+# (macOS / Perl Digest::SHA).
+_self_update_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
 script_self_update() {
-  local base_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/${SELF_UPDATE_REF}/${SELF_UPDATE_RELPATH}"
-  local tmp_dir tmp_script tmp_sum expected_sum actual_sum
+  local base_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/${SELF_UPDATE_BRANCH}/${SELF_UPDATE_RELPATH}"
+  local tmp_dir tmp_script tmp_sum expected_sum actual_sum local_sum target_path stage_file
+
+  # Resolve the on-disk target absolutely so the replace never depends on CWD.
+  if [[ -n "$GIT_ROOT" && "$SCRIPT_PATH" != /* ]]; then
+    target_path="${GIT_ROOT}/${SCRIPT_PATH}"
+  else
+    target_path="$SCRIPT_PATH"
+  fi
 
   tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/bs-a11y-selfupdate.XXXXXX") || {
     echo "Self-update: failed to create temp dir." >&2
@@ -121,44 +141,58 @@ script_self_update() {
   tmp_script="${tmp_dir}/spm.sh"
   tmp_sum="${tmp_dir}/spm.sh.sha256"
 
-  if ! curl -fsSL "$base_url" -o "$tmp_script"; then
-    echo "Self-update: failed to download script from pinned revision." >&2
-    return 1
+  # Fetch the checksum first; if our on-disk copy already matches, we're current.
+  if ! curl -fsSL --connect-timeout 10 --max-time 30 "${base_url}.sha256" -o "$tmp_sum"; then
+    echo "Self-update: could not fetch checksum from ${SELF_UPDATE_BRANCH}; skipping update." >&2
+    return 0
   fi
-  if ! curl -fsSL "${base_url}.sha256" -o "$tmp_sum"; then
-    echo "Self-update: failed to download checksum; aborting (integrity unverifiable)." >&2
+  # Published sidecar is "<sha256>  <filename>"; take the first field.
+  expected_sum=$(awk '{print $1; exit}' "$tmp_sum")
+  if [[ -f "$target_path" ]]; then
+    local_sum=$(_self_update_sha256 "$target_path")
+    if [[ -n "$expected_sum" && "$local_sum" == "$expected_sum" ]]; then
+      return 0
+    fi
+  fi
+
+  if ! curl -fsSL --connect-timeout 10 --max-time 30 "$base_url" -o "$tmp_script"; then
+    echo "Self-update: could not download latest script; skipping update." >&2
+    return 0
+  fi
+
+  actual_sum=$(_self_update_sha256 "$tmp_script")
+  if [[ -z "$expected_sum" || -z "$actual_sum" || "$expected_sum" != "$actual_sum" ]]; then
+    echo "Self-update: checksum mismatch; refusing to apply." >&2
+    echo "  expected: ${expected_sum:-<empty>}" >&2
+    echo "  actual:   ${actual_sum:-<empty>}" >&2
     return 1
   fi
 
+  # Sanity check AFTER integrity: ensure the verified payload is a script.
   if ! head -c2 "$tmp_script" | grep -q '^#!'; then
     echo "Self-update: downloaded file is not a script; aborting." >&2
     return 1
   fi
 
-  # Published sidecar is "<sha256>  <filename>"; take the first field.
-  expected_sum=$(awk '{print $1; exit}' "$tmp_sum")
-  actual_sum=$(shasum -a 256 "$tmp_script" | awk '{print $1}')
-  if [[ -z "$expected_sum" || "$expected_sum" != "$actual_sum" ]]; then
-    echo "Self-update: checksum mismatch; refusing to apply." >&2
-    echo "  expected: ${expected_sum:-<empty>}" >&2
-    echo "  actual:   ${actual_sum}" >&2
+  # Stage inside the target's directory so the rename is atomic (mv across
+  # filesystems would degrade to a non-atomic copy).
+  stage_file=$(mktemp "$(dirname "$target_path")/.bs-a11y-update.XXXXXX") || {
+    echo "Self-update: failed to stage update next to ${target_path}." >&2
     return 1
-  fi
-
-  chmod 0755 "$tmp_script"
-  # Atomic replace: never overwrite the running script in place.
-  if mv -f "$tmp_script" "$SCRIPT_PATH"; then
-    echo "Self-update: updated ${SCRIPT_PATH} to pinned revision ${SELF_UPDATE_REF}."
+  }
+  if cp "$tmp_script" "$stage_file" && chmod 0755 "$stage_file" && mv -f "$stage_file" "$target_path"; then
+    echo "Self-update: updated ${target_path} to latest ${SELF_UPDATE_BRANCH}."
   else
-    echo "Self-update: failed to replace ${SCRIPT_PATH}." >&2
+    rm -f -- "$stage_file"
+    echo "Self-update: failed to replace ${target_path}." >&2
     return 1
   fi
 }
 
-if [[ $SUBCOMMAND == "--self-update" ]]; then
-  script_self_update
-  exit $?
-fi
+# Best-effort auto-update: always fetch the latest launcher from main before
+# running. Failures (offline, integrity) are non-fatal -- the current script
+# keeps working and any update applies on the next invocation.
+script_self_update || true
 
 if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   register_git_hook
