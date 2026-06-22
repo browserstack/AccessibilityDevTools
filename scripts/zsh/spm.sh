@@ -72,10 +72,7 @@ import PackageDescription
 let package = Package(
     name: "Dummy",
     dependencies: [
-        // DEVA11Y-477 / F-005: pin to an immutable revision instead of a mutable
-        // branch HEAD. No release tags exist yet; this is the current origin/main
-        // SHA. Bump to a release tag (.exact("x.y.z")) once tags are published.
-        .package(url: "https://github.com/browserstack/AccessibilityDevTools.git", revision: "db817c37cf74cba47e2fef535f53a35bfc88ec6a")
+        .package(url: "https://github.com/browserstack/AccessibilityDevTools.git", branch: "main")
     ],
     targets: []
 )
