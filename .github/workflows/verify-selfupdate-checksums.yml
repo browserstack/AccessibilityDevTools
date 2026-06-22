@@ -17,6 +17,9 @@ on:
       - 'scripts/**'
       - '.github/workflows/verify-selfupdate-checksums.yml'
 
+permissions:
+  contents: read
+
 jobs:
   verify-sidecars:
     runs-on: ubuntu-latest
