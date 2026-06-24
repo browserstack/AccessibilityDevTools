@@ -127,8 +127,15 @@ script_self_update() {
     echo "Self-update: failed to create temp dir." >&2
     return 1
   }
+  # Clean the work dir and any half-written staged file so an interrupt between
+  # staging and the final mv can't leak a dotfile in the target directory. The
+  # RETURN trap also clears the signal traps so they don't linger past this
+  # function (which would otherwise swallow Ctrl-C during the main command).
+  # tmp_dir is expanded now; stage_file is expanded when the trap fires (escaped $).
   # shellcheck disable=SC2064
-  trap "rm -rf -- '${tmp_dir}'" RETURN
+  trap "rm -rf -- '${tmp_dir}'; rm -f -- \"\${stage_file:-}\"; trap - INT TERM" RETURN
+  # shellcheck disable=SC2064
+  trap "rm -rf -- '${tmp_dir}'; rm -f -- \"\${stage_file:-}\"; exit 130" INT TERM
   tmp_script="${tmp_dir}/cli.sh"
   tmp_sum="${tmp_dir}/cli.sh.sha256"
 
@@ -156,13 +163,15 @@ script_self_update() {
     echo "Self-update: checksum mismatch; refusing to apply." >&2
     echo "  expected: ${expected_sum:-<empty>}" >&2
     echo "  actual:   ${actual_sum:-<empty>}" >&2
-    return 1
+    # Integrity violation — distinct exit code (2) so the caller can tell this
+    # apart from a benign network skip (0) or an operational error (1).
+    return 2
   fi
 
   # Sanity check AFTER integrity: ensure the verified payload is a script.
   if ! head -c2 "$tmp_script" | grep -q '^#!'; then
     echo "Self-update: downloaded file is not a script; aborting." >&2
-    return 1
+    return 2
   fi
 
   # Stage inside the target's directory so the rename is atomic (mv across
@@ -186,9 +195,16 @@ download_binary() {
 }
 
 # Best-effort auto-update: always fetch the latest launcher from main before
-# running. Failures (offline, integrity) are non-fatal -- the current script
-# keeps working and any update applies on the next invocation.
-script_self_update || true
+# running. Network/offline failures are silent (rc 0) and operational errors
+# (rc 1) are non-fatal -- the existing script keeps working. An integrity
+# failure (rc 2: checksum mismatch or non-script payload) leaves the verified
+# on-disk script untouched and is surfaced loudly below, but still does not
+# block the tool (per the always-run-latest, never-block design).
+_self_update_rc=0
+script_self_update || _self_update_rc=$?
+if [[ "$_self_update_rc" -eq 2 ]]; then
+  echo "Self-update: integrity verification FAILED; kept the existing verified script (possible corruption or tampering)." >&2
+fi
 
 if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   register_git_hook
