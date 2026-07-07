@@ -592,12 +592,13 @@ private func isAlpineLinux() -> Bool { false }
 // decoding path and no Codable response model of its own to gate on:
 // capability decisions are read by the CLI from the server's capability set,
 // never re-encoded here. The one RBAC signal the wrapper sees is the CLI's
-// exit code. `browserstack-cli` exits `PERMISSION_DENIED` (3) on a denied
-// action (mirrors ExitCodes.PERMISSION_DENIED in the headless CLI) and has
-// already written the role-aware "Permission denied: …" detail to stderr.
-// Pre-RBAC CLIs (rollout gated by LINTER_RBAC_ENFORCEMENT_ENABLED on the
-// server) never emit this code, so the default path is unchanged.
-private let browserstackCLIPermissionDeniedExitCode: Int32 = 3
+// exit code. `browserstack-cli` exits `PERMISSION_DENIED` (4) on a denied
+// action (mirrors ExitCodes.PERMISSION_DENIED in the headless CLI; 3 is
+// FUP_EXHAUSTED) and has already written the role-aware "Permission denied: …"
+// detail to stderr. Pre-RBAC CLIs (rollout gated by
+// LINTER_RBAC_ENFORCEMENT_ENABLED on the server) never emit this code, so the
+// default path is unchanged.
+private let browserstackCLIPermissionDeniedExitCode: Int32 = 4
 
 // MARK: - CLI invocation
 
