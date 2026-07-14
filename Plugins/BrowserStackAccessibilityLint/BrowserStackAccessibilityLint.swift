@@ -202,33 +202,40 @@ private struct BrowserStackCLIDownloader {
             return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
         }
 
+        Diagnostics.remark("BrowserStackAccessibilityLint: Downloading CLI \(info.version)...")
+
+        // Download into a temporary directory to avoid TOCTOU races
+        let tempDirectory = cacheRoot.appendingPathComponent(".download-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempDirectory) }
+
+        #if os(Windows)
+        let archiveURL = tempDirectory.appendingPathComponent("browserstack-cli.zip")
+        try await download(from: info.resolvedURL, to: archiveURL)
+        Diagnostics.remark("BrowserStackAccessibilityLint: Extracting CLI \(info.version)...")
+        try unzip(archive: archiveURL, into: tempDirectory)
+        try? fileManager.removeItem(at: archiveURL)
+        #else
+        try extractWithBsdtar(from: info.resolvedURL, into: tempDirectory)
+        #endif
+
+        let locatedBinary = try locateExecutable(in: tempDirectory, preferredName: executableName)
+
+        // Atomically swap: remove old version dir, move temp into place
         if fileManager.fileExists(atPath: versionDirectory.path) {
             try fileManager.removeItem(at: versionDirectory)
         }
-        try fileManager.createDirectory(at: versionDirectory, withIntermediateDirectories: true)
+        try fileManager.moveItem(at: tempDirectory, to: versionDirectory)
 
-        Diagnostics.remark("BrowserStackAccessibilityLint: Downloading CLI \(info.version)...")
-
-        #if os(Windows)
-        let archiveURL = versionDirectory.appendingPathComponent("browserstack-cli.zip")
-        try await download(from: info.resolvedURL, to: archiveURL)
-        Diagnostics.remark("BrowserStackAccessibilityLint: Extracting CLI \(info.version)...")
-        try unzip(archive: archiveURL, into: versionDirectory)
-        try? fileManager.removeItem(at: archiveURL)
-        #else
-        try extractWithBsdtar(from: info.resolvedURL, into: versionDirectory)
-        #endif
-
-        let locatedBinary = try locateExecutable(in: versionDirectory, preferredName: executableName)
-        let finalBinaryURL: URL
-        if locatedBinary.lastPathComponent == executableName {
-            finalBinaryURL = locatedBinary
-        } else {
-            finalBinaryURL = expectedExecutableURL
-            if fileManager.fileExists(atPath: finalBinaryURL.path) {
-                try fileManager.removeItem(at: finalBinaryURL)
+        let finalBinaryURL = versionDirectory.appendingPathComponent(locatedBinary.lastPathComponent, isDirectory: false)
+        if locatedBinary.lastPathComponent != executableName {
+            let expectedURL = versionDirectory.appendingPathComponent(executableName, isDirectory: false)
+            if fileManager.fileExists(atPath: expectedURL.path) {
+                try fileManager.removeItem(at: expectedURL)
             }
-            try fileManager.moveItem(at: locatedBinary, to: finalBinaryURL)
+            try fileManager.moveItem(at: finalBinaryURL, to: expectedURL)
+            try ensureExecutablePermissions(at: expectedURL)
+            return BrowserStackCLIArtifact(version: info.version, executableURL: expectedURL)
         }
 
         try ensureExecutablePermissions(at: finalBinaryURL)
