@@ -39,12 +39,39 @@ EOF
 }
 
 a11y_scan() {
-  # Ensure Package.swift is removed on exit (acts like a finally block)
-  cleanup() {
-      if [ $PACKAGE_EXISTS -eq 0 ]; then
-          return
+  # Serialize concurrent scans in the same directory (DEVA11Y-483). Without this the
+  # first instance to exit fires cleanup() and deletes the shared synthetic
+  # Package.swift out from under a still-running peer, so both scans fail
+  # non-deterministically. mkdir is atomic on POSIX filesystems and portable to
+  # macOS, which has no flock(1). Only lock when we own the synthetic file.
+  local lock_dir="${PWD}/.browserstack-a11y-spm.lock"
+  local have_lock=0
+  if [ $PACKAGE_EXISTS -ne 0 ]; then
+    local waited=0
+    while ! mkdir "$lock_dir" 2>/dev/null; do
+      # Reclaim a stale lock left by a peer killed before its trap could run.
+      if [ -n "$(find "$lock_dir" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
+        rm -rf -- "$lock_dir"
+        continue
       fi
-      rm -f -- "${PWD}/Package.swift" "${PWD}/Package.resolved"
+      if [ "$waited" -ge 300 ]; then
+        echo "browserstack-a11y: timed out waiting for another scan in ${PWD}; remove ${lock_dir} if it is stale." >&2
+        exit 1
+      fi
+      sleep 1
+      waited=$((waited + 1))
+    done
+    have_lock=1
+  fi
+
+  # Ensure Package.swift and the lock are removed on exit (acts like a finally block)
+  cleanup() {
+      if [ $PACKAGE_EXISTS -ne 0 ]; then
+          rm -f -- "${PWD}/Package.swift" "${PWD}/Package.resolved"
+      fi
+      if [ "$have_lock" -eq 1 ]; then
+          rmdir "$lock_dir" 2>/dev/null
+      fi
   }
   trap cleanup EXIT
 
