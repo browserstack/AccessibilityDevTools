@@ -211,7 +211,7 @@ private struct BrowserStackCLIDownloader {
         // version directory only ever becomes visible fully-formed, and a loser of the
         // publish race reuses the winner's binary instead of clobbering it.
         let stagingDirectory = cacheRoot.appendingPathComponent(
-            ".tmp.\(info.version).\(ProcessInfo.processInfo.globallyUniqueString)",
+            ".tmp.\(info.version).\(UUID().uuidString)",
             isDirectory: true
         )
         defer { try? fileManager.removeItem(at: stagingDirectory) }
@@ -231,9 +231,14 @@ private struct BrowserStackCLIDownloader {
 
         // Normalise the binary to the expected name *inside* the staging directory so the
         // published version directory is always structurally complete before it is renamed.
+        // Compare full paths, not just the last component: locateExecutable recurses, so a
+        // binary that already has the right name can still sit in a nested subdirectory
+        // (e.g. a versioned tarball folder). Relocating it to the top-level staged path
+        // unless it is already exactly there guarantees stagedExecutableURL exists before
+        // we set permissions and publish.
         let locatedBinary = try locateExecutable(in: stagingDirectory, preferredName: executableName)
         let stagedExecutableURL = stagingDirectory.appendingPathComponent(executableName, isDirectory: false)
-        if locatedBinary.lastPathComponent != executableName {
+        if locatedBinary.standardizedFileURL != stagedExecutableURL.standardizedFileURL {
             if fileManager.fileExists(atPath: stagedExecutableURL.path) {
                 try fileManager.removeItem(at: stagedExecutableURL)
             }
@@ -245,12 +250,15 @@ private struct BrowserStackCLIDownloader {
         return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
     }
 
-    /// Atomically publishes a fully-prepared staging directory to its final version
-    /// directory. `moveItem` (rename(2)) is atomic on a single filesystem, so concurrent
-    /// callers can never observe a half-populated version directory. If the destination
-    /// already exists — another build won the race, or `forceDownload` is replacing a
-    /// stale copy — the existing binary is reused when valid, otherwise the stale
-    /// directory is replaced and the rename retried once.
+    /// Publishes a fully-prepared staging directory to its final version directory. When
+    /// the destination does not yet exist the move is a single atomic rename on the shared
+    /// cache filesystem (staging and version dir are both children of cacheRoot), so
+    /// concurrent builds never observe a half-formed version directory. When it already
+    /// exists — another build won the race, or `forceDownload` is refreshing a stale copy —
+    /// a valid published binary is reused, otherwise the stale directory is replaced and the
+    /// rename retried once. The replace path is deliberate last-writer-wins and is *not*
+    /// atomic; it tolerates a peer removing or republishing the directory concurrently
+    /// rather than failing the build.
     private func publishVersionDirectory(from stagingDirectory: URL, to versionDirectory: URL, expectedExecutableURL: URL) throws {
         do {
             try fileManager.moveItem(at: stagingDirectory, to: versionDirectory)
@@ -261,10 +269,20 @@ private struct BrowserStackCLIDownloader {
                 return
             }
             // Stale/incomplete destination, or a forced refresh: replace and retry once.
-            if fileManager.fileExists(atPath: versionDirectory.path) {
-                try fileManager.removeItem(at: versionDirectory)
+            // removeItem is best-effort so a peer deleting the directory first does not
+            // turn into an ENOENT crash mid-race.
+            try? fileManager.removeItem(at: versionDirectory)
+            do {
+                try fileManager.moveItem(at: stagingDirectory, to: versionDirectory)
+            } catch {
+                // A peer republished the version directory between our remove and move. If
+                // it now holds a valid binary, treat that as success rather than failing a
+                // build that already has the artifact it needs.
+                if fileManager.isExecutableFile(atPath: expectedExecutableURL.path) {
+                    return
+                }
+                throw error
             }
-            try fileManager.moveItem(at: stagingDirectory, to: versionDirectory)
         }
     }
 
