@@ -202,37 +202,70 @@ private struct BrowserStackCLIDownloader {
             return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
         }
 
-        if fileManager.fileExists(atPath: versionDirectory.path) {
-            try fileManager.removeItem(at: versionDirectory)
-        }
-        try fileManager.createDirectory(at: versionDirectory, withIntermediateDirectories: true)
+        // Extract into a unique staging directory and atomically publish it to the final
+        // version directory (DEVA11Y-482). The previous check-delete-recreate sequence was
+        // a TOCTOU: two concurrent builds sharing ~/.cache could both fall through the
+        // isExecutableFile check, then one instance's removeItem/createDirectory would wipe
+        // the other's in-progress extraction, corrupting the binary or leaving a partial
+        // file that locateExecutable's fallback would happily run. Staging + rename means a
+        // version directory only ever becomes visible fully-formed, and a loser of the
+        // publish race reuses the winner's binary instead of clobbering it.
+        let stagingDirectory = cacheRoot.appendingPathComponent(
+            ".tmp.\(info.version).\(ProcessInfo.processInfo.globallyUniqueString)",
+            isDirectory: true
+        )
+        defer { try? fileManager.removeItem(at: stagingDirectory) }
+        try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
 
         Diagnostics.remark("BrowserStackAccessibilityLint: Downloading CLI \(info.version)...")
 
         #if os(Windows)
-        let archiveURL = versionDirectory.appendingPathComponent("browserstack-cli.zip")
+        let archiveURL = stagingDirectory.appendingPathComponent("browserstack-cli.zip")
         try await download(from: info.resolvedURL, to: archiveURL)
         Diagnostics.remark("BrowserStackAccessibilityLint: Extracting CLI \(info.version)...")
-        try unzip(archive: archiveURL, into: versionDirectory)
+        try unzip(archive: archiveURL, into: stagingDirectory)
         try? fileManager.removeItem(at: archiveURL)
         #else
-        try extractWithBsdtar(from: info.resolvedURL, into: versionDirectory)
+        try extractWithBsdtar(from: info.resolvedURL, into: stagingDirectory)
         #endif
 
-        let locatedBinary = try locateExecutable(in: versionDirectory, preferredName: executableName)
-        let finalBinaryURL: URL
-        if locatedBinary.lastPathComponent == executableName {
-            finalBinaryURL = locatedBinary
-        } else {
-            finalBinaryURL = expectedExecutableURL
-            if fileManager.fileExists(atPath: finalBinaryURL.path) {
-                try fileManager.removeItem(at: finalBinaryURL)
+        // Normalise the binary to the expected name *inside* the staging directory so the
+        // published version directory is always structurally complete before it is renamed.
+        let locatedBinary = try locateExecutable(in: stagingDirectory, preferredName: executableName)
+        let stagedExecutableURL = stagingDirectory.appendingPathComponent(executableName, isDirectory: false)
+        if locatedBinary.lastPathComponent != executableName {
+            if fileManager.fileExists(atPath: stagedExecutableURL.path) {
+                try fileManager.removeItem(at: stagedExecutableURL)
             }
-            try fileManager.moveItem(at: locatedBinary, to: finalBinaryURL)
+            try fileManager.moveItem(at: locatedBinary, to: stagedExecutableURL)
         }
+        try ensureExecutablePermissions(at: stagedExecutableURL)
 
-        try ensureExecutablePermissions(at: finalBinaryURL)
-        return BrowserStackCLIArtifact(version: info.version, executableURL: finalBinaryURL)
+        try publishVersionDirectory(from: stagingDirectory, to: versionDirectory, expectedExecutableURL: expectedExecutableURL)
+        return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
+    }
+
+    /// Atomically publishes a fully-prepared staging directory to its final version
+    /// directory. `moveItem` (rename(2)) is atomic on a single filesystem, so concurrent
+    /// callers can never observe a half-populated version directory. If the destination
+    /// already exists — another build won the race, or `forceDownload` is replacing a
+    /// stale copy — the existing binary is reused when valid, otherwise the stale
+    /// directory is replaced and the rename retried once.
+    private func publishVersionDirectory(from stagingDirectory: URL, to versionDirectory: URL, expectedExecutableURL: URL) throws {
+        do {
+            try fileManager.moveItem(at: stagingDirectory, to: versionDirectory)
+            return
+        } catch {
+            if !forceDownload, fileManager.isExecutableFile(atPath: expectedExecutableURL.path) {
+                // A concurrent build already published a valid binary; reuse it.
+                return
+            }
+            // Stale/incomplete destination, or a forced refresh: replace and retry once.
+            if fileManager.fileExists(atPath: versionDirectory.path) {
+                try fileManager.removeItem(at: versionDirectory)
+            }
+            try fileManager.moveItem(at: stagingDirectory, to: versionDirectory)
+        }
     }
 
 #if !os(Windows)
