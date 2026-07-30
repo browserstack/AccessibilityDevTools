@@ -195,16 +195,19 @@ script_self_update() {
   fi
 }
 
-# Best-effort auto-update: always fetch the latest launcher from main before
-# running. Network/offline failures are silent (rc 0) and operational errors
-# (rc 1) are non-fatal -- the existing script keeps working. An integrity
-# failure (rc 2: checksum mismatch or non-script payload) leaves the verified
-# on-disk script untouched and is surfaced loudly below, but still does not
-# block the tool (per the always-run-latest, never-block design).
-_self_update_rc=0
-script_self_update || _self_update_rc=$?
-if [[ "$_self_update_rc" -eq 2 ]]; then
-  echo "Self-update: integrity verification FAILED; kept the existing verified script (possible corruption or tampering)." >&2
+# Self-update is opt-in (DEVA11Y-475): it runs only via the explicit `self-update`
+# subcommand, never automatically on every invocation. Running it unconditionally
+# before subcommand parsing meant a single compromise of the fetched source silently
+# replaced the running script on every developer's machine, with no way to opt out;
+# gating it behind an explicit command removes that always-on side-effect. Integrity
+# verification (SHA-256 check + atomic staging) still guards the download itself.
+if [[ $SUBCOMMAND == "self-update" ]]; then
+  _self_update_rc=0
+  script_self_update || _self_update_rc=$?
+  if [[ "$_self_update_rc" -eq 2 ]]; then
+    echo "Self-update: integrity verification FAILED; kept the existing verified script (possible corruption or tampering)." >&2
+  fi
+  exit "$_self_update_rc"
 fi
 
 if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then

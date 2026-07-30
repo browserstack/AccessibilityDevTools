@@ -210,5 +210,24 @@ Fish
 You can then edit the `.git/hooks/pre-commit` file to customise the registered pre-commit hook.
 
 ---
+## Updating the launcher script
+The launcher scripts no longer update themselves automatically on every run. To pull the latest verified launcher on demand, run the `self-update` subcommand — the download is checked against a published SHA-256 checksum and is only applied if it matches.
+
+Zsh
+```zsh
+./browserstack-a11y-scan-spm-zsh.sh self-update
+```
+
+Bash
+```bash
+./browserstack-a11y-scan-spm-bash.sh self-update
+```
+
+Fish
+```bash
+./browserstack-a11y-scan-spm-fish.sh self-update
+```
+
+---
 ## Support
 For any issues or feedback, reach out to support@browserstack.com
