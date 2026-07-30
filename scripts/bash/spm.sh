@@ -1,7 +1,5 @@
 #!/usr/bin/env bash -il
 
-[ -f "${PWD}/Package.swift" ]
-PACKAGE_EXISTS="$?"
 GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 SCRIPT_PATH=$(realpath --relative-to="$GIT_ROOT" "$0" 2>/dev/null || realpath "$0")
 SUBCOMMAND="$1"
@@ -38,49 +36,76 @@ EOF
   fi
 }
 
+# Resolve a lock directory OUTSIDE the scanned package, keyed by the package path,
+# so a crash can never leave a lock inside the user's working tree (nor let a
+# pre-commit `git add -A` stage it). cksum is POSIX and always present.
+_spm_lock_dir() {
+  local key
+  key=$(printf '%s' "$PWD" | cksum | cut -d' ' -f1)
+  printf '%s/browserstack-a11y-spm-%s.lock' "${TMPDIR:-/tmp}" "$key"
+}
+
+# Acquire an exclusive per-directory lock via atomic mkdir. Serializes ALL
+# concurrent scans of the same directory regardless of when each started, so no
+# instance ever deletes a synthetic Package.swift another is still using. A lock
+# left by a crashed peer is reclaimed by PID liveness (kill -0) -- never by
+# wall-clock age, which cannot tell a slow-but-alive scan from a dead one -- and
+# the reclaim is claimed atomically via rename so two waiters can't both take it.
+# Returns: 0 acquired, 2 timed out (a peer is scanning), 1 lock dir unusable.
+_spm_acquire_lock() {
+  local dir="$1" waited=0 announced=0 owner_pid stale
+  while ! mkdir "$dir" 2>/dev/null; do
+    # A non-EEXIST failure (unwritable/read-only/full TMPDIR) is not contention --
+    # fail fast rather than waiting out the full timeout on a misleading message.
+    if [ ! -d "$dir" ]; then
+      echo "A11y scan: cannot create lock at ${dir} (check TMPDIR permissions/space)." >&2
+      return 1
+    fi
+    owner_pid=$(cat "${dir}/pid" 2>/dev/null)
+    if [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+      # Owner is dead: claim the stale lock. Only one racer's mv can succeed; the
+      # losers fall through and retry mkdir. Never rm a path a peer may recreate.
+      stale="${dir}.stale.$$"
+      if mv "$dir" "$stale" 2>/dev/null; then
+        rm -rf -- "$stale"
+      fi
+      continue
+    fi
+    if [ "$announced" -eq 0 ]; then
+      echo "A11y scan: waiting for another scan in ${PWD} to finish..." >&2
+      announced=1
+    fi
+    if [ "$waited" -ge 300 ]; then
+      return 2
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "$$" > "${dir}/pid"
+  return 0
+}
+
+# lock_dir/have_lock/created_package are GLOBAL on purpose: the EXIT trap fires
+# after a11y_scan has returned, when its `local`s are already out of scope, so
+# cleanup state must be global to survive.
 a11y_scan() {
-  # Serialize concurrent scans in the same directory (DEVA11Y-483). Without this the
-  # first instance to exit fires cleanup() and deletes the shared synthetic
-  # Package.swift out from under a still-running peer, so both scans fail
-  # non-deterministically. mkdir is atomic on POSIX filesystems and portable to
-  # macOS, which has no flock(1). Only lock when we own the synthetic file.
-  local lock_dir="${PWD}/.browserstack-a11y-spm.lock"
-  local have_lock=0
-  if [ $PACKAGE_EXISTS -ne 0 ]; then
-    local waited=0
-    while ! mkdir "$lock_dir" 2>/dev/null; do
-      # Reclaim a stale lock left by a peer killed before its trap could run.
-      if [ -n "$(find "$lock_dir" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
-        rm -rf -- "$lock_dir"
-        continue
-      fi
-      if [ "$waited" -ge 300 ]; then
-        echo "browserstack-a11y: timed out waiting for another scan in ${PWD}; remove ${lock_dir} if it is stale." >&2
-        exit 1
-      fi
-      sleep 1
-      waited=$((waited + 1))
-    done
-    have_lock=1
-  fi
+  lock_dir=$(_spm_lock_dir)
+  have_lock=0
+  created_package=0
 
-  # Ensure Package.swift and the lock are removed on exit (acts like a finally block)
-  cleanup() {
-      if [ $PACKAGE_EXISTS -ne 0 ]; then
-          rm -f -- "${PWD}/Package.swift" "${PWD}/Package.resolved"
-      fi
-      if [ "$have_lock" -eq 1 ]; then
-          rmdir "$lock_dir" 2>/dev/null
-      fi
-  }
-  trap cleanup EXIT
+  _spm_acquire_lock "$lock_dir"
+  case "$?" in
+    0) have_lock=1 ;;
+    2) echo "A11y scan: another scan is already running in ${PWD}; skipping." >&2
+       return 0 ;;
+    *) echo "A11y scan: proceeding without a lock; concurrent scans in ${PWD} may conflict." >&2 ;;
+  esac
 
-  setup() {
-      if [ $PACKAGE_EXISTS -eq 0 ]; then
-          return
-      fi
-
-      cat > Package.swift <<EOF
+  # Decide ownership UNDER the lock, from the live filesystem -- not a snapshot
+  # taken at script start. Only create the synthetic manifest if none exists now,
+  # and on exit delete only what this instance created.
+  if [ ! -f "${PWD}/Package.swift" ]; then
+    cat > Package.swift <<EOF
 // swift-tools-version: 5.9
 import PackageDescription
 
@@ -92,9 +117,20 @@ let package = Package(
     targets: []
 )
 EOF
-  }
+    created_package=1
+  fi
 
-  setup
+  # finally-block: remove only our own synthetic manifest, then release the lock.
+  cleanup() {
+      if [ "${created_package:-0}" -eq 1 ]; then
+          rm -f -- "${PWD}/Package.swift" "${PWD}/Package.resolved"
+      fi
+      if [ "${have_lock:-0}" -eq 1 ]; then
+          rm -rf -- "$lock_dir"
+      fi
+  }
+  trap cleanup EXIT
+
   if [[ -z "$EXTRA_ARGS" ]]; then
     EXTRA_ARGS="--include **/*.swift --include **/*.xib --include **/*.storyboard"
   fi
