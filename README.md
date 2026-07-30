@@ -211,7 +211,7 @@ You can then edit the `.git/hooks/pre-commit` file to customise the registered p
 
 ---
 ## Updating the launcher script
-The launcher scripts no longer update themselves automatically on every run. To pull the latest verified launcher on demand, run the `self-update` subcommand — the download is checked against a published SHA-256 checksum and is only applied if it matches.
+The launcher scripts no longer update themselves automatically on every run. To pull the latest launcher on demand, run the `self-update` subcommand — the download is checked against a published SHA-256 checksum (an integrity check against corruption in transit, not an authenticity signature, since the script and its checksum share one origin) and is only applied if it matches.
 
 Zsh
 ```zsh

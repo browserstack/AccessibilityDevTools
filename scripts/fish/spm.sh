@@ -96,9 +96,10 @@ EOF
           scan $EXTRA_ARGS
 }
 
-# Self-update tracks the latest launcher on `main` so users always run the
-# newest version. DEVA11Y-475/477/478: we deliberately follow main HEAD rather
-# than a pinned revision (per maintainer intent: always take the latest).
+# Self-update pulls the latest launcher from `main` on demand: it runs only via
+# the explicit `self-update` subcommand (DEVA11Y-475), not automatically on every
+# invocation. DEVA11Y-477/478: when it does run we deliberately follow main HEAD
+# rather than a pinned revision (per maintainer intent: take the latest on demand).
 # Hardening retained from the pinning work: download to a temp dir, verify a
 # SHA-256 sidecar (a download-integrity check, NOT an authenticity signature --
 # script and checksum share one origin), sanity-check the shebang, then
