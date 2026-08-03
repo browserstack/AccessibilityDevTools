@@ -44,7 +44,11 @@ jobs:
       - name: Swift toolchain
         run: swift --version
 
-      - name: Build plugin package
+      # The repo root is a plugin-only package (no buildable target), so it is
+      # not built directly. Building the tests/spm harness compiles both the
+      # a11y-scan command plugin (via the path dependency) and the sample sources.
+      - name: Build harness (compiles the a11y-scan plugin)
+        working-directory: tests/spm
         run: swift build
 
       - name: End-to-end scan smoke (tests/spm)
