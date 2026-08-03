@@ -1,0 +1,52 @@
+# Smoke-tests the `a11y-scan` SwiftPM command plugin end-to-end on every PR:
+# builds the plugin and runs a real accessibility scan against the tests/spm
+# harness (sample SwiftUI sources with intentional a11y issues). It reuses the
+# repository's own gated integration test (testA11yScanPluginRuns) so the scan
+# invocation stays defined in exactly one place.
+#
+# The scan downloads the BrowserStack CLI and makes authenticated network calls,
+# so it needs BROWSERSTACK_USERNAME / BROWSERSTACK_ACCESS_KEY repo secrets. Those
+# secrets are never exposed to fork PRs, so this job is gated to same-repo PRs
+# (and manual dispatch); fork PRs skip it. If the secrets are not configured yet,
+# the end-to-end test XCTSkips and the job still passes (build + unit test only).
+name: SPM plugin smoke test
+
+on:
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spm-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spm-smoke:
+    name: a11y-scan end-to-end (SwiftPM)
+    runs-on: macos-14
+    timeout-minutes: 25
+    # Secrets are unavailable to fork PRs, so the authenticated scan can only run
+    # on same-repo PRs or a manual dispatch. Fork PRs skip this job.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.fork == false
+    env:
+      BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
+      BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
+      # Un-gates tests/spm/Tests/A11yDemoLibTests/testA11yScanPluginRuns, which is
+      # skipped unless RUN_A11Y_SCAN=1 and BrowserStack credentials are present.
+      RUN_A11Y_SCAN: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Swift toolchain
+        run: swift --version
+
+      - name: Build plugin package
+        run: swift build
+
+      - name: End-to-end scan smoke (tests/spm)
+        working-directory: tests/spm
+        run: swift test
