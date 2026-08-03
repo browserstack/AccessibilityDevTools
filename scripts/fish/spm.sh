@@ -159,9 +159,10 @@ EOF
           scan $EXTRA_ARGS
 }
 
-# Self-update tracks the latest launcher on `main` so users always run the
-# newest version. DEVA11Y-475/477/478: we deliberately follow main HEAD rather
-# than a pinned revision (per maintainer intent: always take the latest).
+# Self-update pulls the latest launcher from `main` on demand: it runs only via
+# the explicit `self-update` subcommand (DEVA11Y-475), not automatically on every
+# invocation. DEVA11Y-477/478: when it does run we deliberately follow main HEAD
+# rather than a pinned revision (per maintainer intent: take the latest on demand).
 # Hardening retained from the pinning work: download to a temp dir, verify a
 # SHA-256 sidecar (a download-integrity check, NOT an authenticity signature --
 # script and checksum share one origin), sanity-check the shebang, then
@@ -259,16 +260,19 @@ script_self_update() {
   fi
 }
 
-# Best-effort auto-update: always fetch the latest launcher from main before
-# running. Network/offline failures are silent (rc 0) and operational errors
-# (rc 1) are non-fatal -- the existing script keeps working. An integrity
-# failure (rc 2: checksum mismatch or non-script payload) leaves the verified
-# on-disk script untouched and is surfaced loudly below, but still does not
-# block the tool (per the always-run-latest, never-block design).
-_self_update_rc=0
-script_self_update || _self_update_rc=$?
-if [[ "$_self_update_rc" -eq 2 ]]; then
-  echo "Self-update: integrity verification FAILED; kept the existing verified script (possible corruption or tampering)." >&2
+# Self-update is opt-in (DEVA11Y-475): it runs only via the explicit `self-update`
+# subcommand, never automatically on every invocation. Running it unconditionally
+# before subcommand parsing meant a single compromise of the fetched source silently
+# replaced the running script on every developer's machine, with no way to opt out;
+# gating it behind an explicit command removes that always-on side-effect. Integrity
+# verification (SHA-256 check + atomic staging) still guards the download itself.
+if [[ $SUBCOMMAND == "self-update" ]]; then
+  _self_update_rc=0
+  script_self_update || _self_update_rc=$?
+  if [[ "$_self_update_rc" -eq 2 ]]; then
+    echo "Self-update: integrity verification FAILED; kept the existing verified script (possible corruption or tampering)." >&2
+  fi
+  exit "$_self_update_rc"
 fi
 
 if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
