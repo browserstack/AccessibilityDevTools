@@ -7,8 +7,9 @@
 # The scan downloads the BrowserStack CLI and makes authenticated network calls,
 # so it needs BROWSERSTACK_USERNAME / BROWSERSTACK_ACCESS_KEY repo secrets. Those
 # secrets are never exposed to fork PRs, so that job is gated to same-repo PRs
-# (and manual dispatch); fork PRs skip it. If the secrets are not configured yet,
-# the end-to-end test XCTSkips and the job still passes (build + unit test only).
+# (and manual dispatch); fork PRs skip it. The scan step is itself guarded on the
+# secrets being present, so if they are not configured the scan is skipped and the
+# job still passes on the build step alone.
 #
 # A second job (scripts-lint) syntax-checks every launcher script under scripts/.
 # It needs no secrets, so it runs on all PRs including forks.
@@ -54,7 +55,12 @@ jobs:
         working-directory: tests/spm
         run: swift build
 
+      # Guarded on the secrets actually being set: GitHub exposes an unset secret
+      # as an empty string (present, not nil), so without this guard the scan would
+      # run with empty credentials and fail. When the secrets are absent this step
+      # is skipped and the job stays green on the build step alone.
       - name: End-to-end scan smoke (tests/spm)
+        if: env.BROWSERSTACK_USERNAME != '' && env.BROWSERSTACK_ACCESS_KEY != ''
         working-directory: tests/spm
         run: swift test
 
@@ -67,7 +73,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # Every script under scripts/ — the bash, zsh and fish variants alike — is
-      # a bash script (`#!/usr/bin/env bash`); the variants differ only in which
+      # a bash script (`#!/usr/bin/env bash -il`); the variants differ only in which
       # login shell they source BrowserStack creds from. So all of them are
       # syntax-checked with `bash -n`. The scripts self-update, register git
       # hooks and need credentials, so they are not executed here — this is a
@@ -84,10 +90,13 @@ jobs:
           fi
           status=0
           for script in "${scripts[@]}"; do
+            # Plain log lines, not ::notice file=/::error file= workflow commands:
+            # scripts/ filenames are attacker-controllable on fork PRs, and
+            # interpolating them into a workflow command is an injection vector.
             if bash -n "$script"; then
-              echo "::notice file=${script}::bash -n OK"
+              echo "OK      $script"
             else
-              echo "::error file=${script}::bash -n failed — fix the syntax error above."
+              echo "FAILED  $script (bash -n syntax error above)"
               status=1
             fi
           done
