@@ -6,9 +6,12 @@
 #
 # The scan downloads the BrowserStack CLI and makes authenticated network calls,
 # so it needs BROWSERSTACK_USERNAME / BROWSERSTACK_ACCESS_KEY repo secrets. Those
-# secrets are never exposed to fork PRs, so this job is gated to same-repo PRs
+# secrets are never exposed to fork PRs, so that job is gated to same-repo PRs
 # (and manual dispatch); fork PRs skip it. If the secrets are not configured yet,
 # the end-to-end test XCTSkips and the job still passes (build + unit test only).
+#
+# A second job (scripts-lint) syntax-checks every launcher script under scripts/.
+# It needs no secrets, so it runs on all PRs including forks.
 name: SPM plugin smoke test
 
 on:
@@ -54,3 +57,38 @@ jobs:
       - name: End-to-end scan smoke (tests/spm)
         working-directory: tests/spm
         run: swift test
+
+  scripts-lint:
+    name: Launcher scripts (bash syntax)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Every script under scripts/ — the bash, zsh and fish variants alike — is
+      # a bash script (`#!/usr/bin/env bash`); the variants differ only in which
+      # login shell they source BrowserStack creds from. So all of them are
+      # syntax-checked with `bash -n`. The scripts self-update, register git
+      # hooks and need credentials, so they are not executed here — this is a
+      # static syntax gate. (Checksum integrity is covered separately by
+      # verify-selfupdate-checksums.yml.)
+      - name: Syntax-check all launcher scripts (bash -n)
+        run: |
+          set -uo pipefail
+          shopt -s globstar nullglob
+          scripts=(scripts/**/*.sh)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "::error::No .sh scripts found under scripts/ — checkout or glob is wrong."
+            exit 1
+          fi
+          status=0
+          for script in "${scripts[@]}"; do
+            if bash -n "$script"; then
+              echo "::notice file=${script}::bash -n OK"
+            else
+              echo "::error file=${script}::bash -n failed — fix the syntax error above."
+              status=1
+            fi
+          done
+          exit "$status"
