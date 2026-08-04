@@ -59,10 +59,31 @@ jobs:
       # as an empty string (present, not nil), so without this guard the scan would
       # run with empty credentials and fail. When the secrets are absent this step
       # is skipped and the job stays green on the build step alone.
+      #
+      # The scan hits BrowserStack (network + auth + CLI download), so a transient
+      # upstream hiccup should not red-block a PR. Retry the scan up to 3 times with
+      # backoff; a consistent failure still fails the gate. `swift test` reuses the
+      # first attempt's build, so retries only re-run the scan.
       - name: End-to-end scan smoke (tests/spm)
         if: env.BROWSERSTACK_USERNAME != '' && env.BROWSERSTACK_ACCESS_KEY != ''
         working-directory: tests/spm
-        run: swift test
+        run: |
+          set -uo pipefail
+          attempts=3
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::a11y-scan smoke attempt $i/$attempts"
+            if swift test; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            if [ "$i" -lt "$attempts" ]; then
+              echo "Attempt $i failed; retrying in 20s (occasional transient upstream failures are expected)."
+              sleep 20
+            fi
+          done
+          echo "::error::a11y-scan smoke failed after $attempts attempts."
+          exit 1
 
   scripts-lint:
     name: Launcher scripts (bash syntax)
