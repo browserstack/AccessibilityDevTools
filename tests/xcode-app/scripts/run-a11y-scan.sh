@@ -20,7 +20,7 @@ fi
 swift package plugin \
   --allow-writing-to-directory "$HOME/.cache" \
   --allow-writing-to-package-directory \
-  --allow-network-connections 'all(ports: [])' \
+  --allow-network-connections all:80,443 \
   scan \
   --include "**/*.swift" \
   --include "**/*.xib" \
