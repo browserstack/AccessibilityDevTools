@@ -149,8 +149,12 @@ EOF
   # environments (MDM/security tooling) stamp it on network-written files, which
   # blocks the SPM plugin's cached CLI with no "Allow Anyway" option. Strip it
   # from any cached binary. No-op off macOS / when the cache or attr is absent.
+  # The plugin runs below under `env -i`, which drops XDG_CACHE_HOME, so it always
+  # resolves its cache to $HOME/.cache (see Plugins/.../BrowserStackAccessibilityLint.swift).
+  # Mirror that here rather than the outer shell's XDG_CACHE_HOME, or the strip
+  # would miss the plugin's real binary when that var is set to a custom path.
   if [[ "$(uname -s)" == "Darwin" ]] && command -v xattr >/dev/null 2>&1; then
-    cli_cache="${XDG_CACHE_HOME:-$HOME/.cache}/browserstack/devtools/spm-plugin"
+    cli_cache="$HOME/.cache/browserstack/devtools/spm-plugin"
     [ -d "$cli_cache" ] && find "$cli_cache" -type f -name 'browserstack-cli' \
       -exec xattr -d com.apple.quarantine {} \; 2>/dev/null || true
   fi
