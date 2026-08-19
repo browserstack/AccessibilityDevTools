@@ -143,6 +143,17 @@ EOF
   }
   trap cleanup EXIT
 
+  # macOS Gatekeeper refuses to run binaries carrying the com.apple.quarantine
+  # attribute unless they are Developer ID signed and notarized. Some managed
+  # environments (MDM/security tooling) stamp it on network-written files, which
+  # blocks the SPM plugin's cached CLI with no "Allow Anyway" option. Strip it
+  # from any cached binary. No-op off macOS / when the cache or attr is absent.
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v xattr >/dev/null 2>&1; then
+    cli_cache="${XDG_CACHE_HOME:-$HOME/.cache}/browserstack/devtools/spm-plugin"
+    [ -d "$cli_cache" ] && find "$cli_cache" -type f -name 'browserstack-cli' \
+      -exec xattr -d com.apple.quarantine {} \; 2>/dev/null || true
+  fi
+
   if [[ -z "$EXTRA_ARGS" ]]; then
     EXTRA_ARGS="--include **/*.swift --include **/*.xib --include **/*.storyboard"
   fi
