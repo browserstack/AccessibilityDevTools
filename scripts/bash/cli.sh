@@ -179,9 +179,20 @@ script_self_update() {
   fi
 }
 
+strip_quarantine() {
+  # macOS Gatekeeper refuses to run binaries carrying the com.apple.quarantine
+  # attribute unless they are Developer ID signed and notarized. Some managed
+  # environments (MDM/security tooling) stamp this attribute on network-written
+  # files, which blocks the downloaded CLI with no "Allow Anyway" option. Strip
+  # it if present. No-op on non-macOS and when the attribute is absent.
+  if [[ "$OS" == "macos" ]] && command -v xattr >/dev/null 2>&1; then
+    xattr -d com.apple.quarantine "$BINARY_PATH" 2>/dev/null || true
+  fi
+}
+
 download_binary() {
   curl -R -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH"
-  bsdtar -xvf "$BINARY_ZIP_PATH" -O > "$BINARY_PATH" && chmod 0775 "$BINARY_PATH"
+  bsdtar -xvf "$BINARY_ZIP_PATH" -O > "$BINARY_PATH" && chmod 0755 "$BINARY_PATH" && strip_quarantine
 }
 
 # Self-update is opt-in (DEVA11Y-475): it runs only via the explicit `self-update`
