@@ -229,9 +229,23 @@ verify_binary_integrity() {
   fi
   expected=$(awk '{print $1; exit}' "$tmp_sum" | tr 'A-Z' 'a-z')
   actual=$(_self_update_sha256 "$zip_path" | tr 'A-Z' 'a-z')
-  if [[ -z "$expected" || -z "$actual" || "$expected" != "$actual" ]]; then
+  # A present-but-empty sidecar body is a hard failure: once the server publishes
+  # checksums, a blank value must not silently downgrade to "no verification".
+  if [[ -z "$expected" ]]; then
+    echo "CLI download: empty checksum at ${sum_url}; refusing to use the downloaded binary." >&2
+    rm -f -- "$zip_path"
+    return 2
+  fi
+  # A non-empty body that is NOT a 64-char hex digest is a CDN/S3 error page answered 200
+  # (e.g. an S3 `AccessDenied` XML), not a checksum. Its first token must not become the
+  # "expected hash" and hard-fail every client on every run; fail OPEN instead (DEVA11Y-473/474 review).
+  if ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "CLI download: malformed checksum at ${sum_url}; proceeding WITHOUT verification (DEVA11Y-473/474)." >&2
+    return 0
+  fi
+  if [[ -z "$actual" || "$expected" != "$actual" ]]; then
     echo "CLI download: checksum mismatch; refusing to use the downloaded binary." >&2
-    echo "  expected: ${expected:-<empty>}" >&2
+    echo "  expected: ${expected}" >&2
     echo "  actual:   ${actual:-<empty>}" >&2
     rm -f -- "$zip_path"
     return 2
@@ -245,7 +259,15 @@ download_binary() {
     return 1
   }
   verify_binary_integrity "$BINARY_ZIP_PATH" "$resolved_url" || return $?
-  bsdtar -xvf "$BINARY_ZIP_PATH" -O > "$BINARY_PATH" && chmod 0755 "$BINARY_PATH" && strip_quarantine
+  # Extract to a temp path and atomically publish it. `> "$BINARY_PATH"` truncates the
+  # destination before bsdtar is known to have succeeded, so a corrupt payload — the live
+  # case today, since no sidecars are published yet and verification fails open — would
+  # zero out a previously-good cached binary. Stage + mv keeps the cached binary intact
+  # unless a fresh, extractable payload is in hand (DEVA11Y-473/474 review).
+  bsdtar -xvf "$BINARY_ZIP_PATH" -O > "${BINARY_PATH}.tmp" \
+    && chmod 0755 "${BINARY_PATH}.tmp" \
+    && mv -f "${BINARY_PATH}.tmp" "$BINARY_PATH" \
+    && strip_quarantine
 }
 
 # Self-update is opt-in (DEVA11Y-475): it runs only via the explicit `self-update`

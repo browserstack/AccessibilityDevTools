@@ -253,11 +253,10 @@ private struct BrowserStackCLIDownloader {
         let archiveURL = cacheRoot.appendingPathComponent(".tmp.\(info.version).\(UUID().uuidString).zip")
         defer { try? fileManager.removeItem(at: archiveURL) }
         try await download(from: info.resolvedURL, to: archiveURL)
-        #if !os(Windows)
-        // Verify BEFORE extraction/exec. Streaming curl | bsdtar straight to disk (the old
+        // Verify BEFORE extraction/exec, on every platform (DEVA11Y-473/474 review: Windows
+        // was previously left unverified). Streaming curl | bsdtar straight to disk (the old
         // path) left no opportunity to check the payload; downloading to a file first does.
         try await verifyArchiveChecksum(archiveURL: archiveURL, resolvedURL: info.resolvedURL)
-        #endif
         Diagnostics.remark("BrowserStackAccessibilityLint: Extracting CLI \(info.version)...")
         #if os(Windows)
         try unzip(archive: archiveURL, into: stagingDirectory)
@@ -334,7 +333,6 @@ private struct BrowserStackCLIDownloader {
         }
     }
 
-#if !os(Windows)
     /// DEVA11Y-473/474: verify the downloaded CLI archive against a server-published
     /// SHA-256 sidecar (`<asset>.sha256`) before it is extracted, made executable and run.
     /// api.browserstack.com (control plane) 302-redirects to a versioned, immutable asset on
@@ -378,16 +376,35 @@ private struct BrowserStackCLIDownloader {
               !expected.isEmpty else {
             throw PluginError("BrowserStack CLI checksum sidecar was empty or unreadable; refusing to use the downloaded binary.")
         }
+        // A non-empty body that is not a 64-char hex digest is a CDN/S3 error page answered
+        // 200 (e.g. an S3 `AccessDenied` XML), not a checksum. Fail OPEN rather than turning
+        // its first token into the "expected hash" and hard-failing every client on every
+        // run (DEVA11Y-473/474 review).
+        guard expected.count == 64, expected.allSatisfy({ $0.isHexDigit }) else {
+            Diagnostics.remark("BrowserStackAccessibilityLint: malformed checksum at \(sidecarURL.absoluteString); proceeding WITHOUT integrity verification (DEVA11Y-473/474).")
+            return
+        }
         let actual = try sha256Hex(of: archiveURL)
         guard actual.caseInsensitiveCompare(expected) == .orderedSame else {
             throw PluginError("BrowserStack CLI checksum mismatch; refusing to use the downloaded binary.\n  expected: \(expected)\n  actual:   \(actual)")
         }
     }
 
-    /// SHA-256 of a file as a lowercase hex string, via the platform `shasum`/`sha256sum`
-    /// tool. Matches the launcher scripts and avoids pulling CryptoKit/swift-crypto into the
-    /// plugin (CryptoKit is Apple-only; this path also serves Linux).
+    /// SHA-256 of a file as a lowercase hex string. On Unix (macOS/Linux) it shells out to
+    /// `shasum`/`sha256sum`; on Windows it uses PowerShell's built-in `Get-FileHash`. This
+    /// avoids pulling CryptoKit/swift-crypto into the plugin (CryptoKit is Apple-only) while
+    /// still verifying on every platform the plugin builds for (DEVA11Y-473/474 review).
     private func sha256Hex(of fileURL: URL) throws -> String {
+        let process = Process()
+        let launchName: String
+        #if os(Windows)
+        // Windows ships no shasum/sha256sum; Get-FileHash is the built-in equivalent. The
+        // archive is a UUID-named temp file under the cache root, so single-quoting the
+        // literal path is safe (no embedded quotes to escape).
+        launchName = "powershell.exe"
+        process.executableURL = URL(fileURLWithPath: "powershell.exe")
+        process.arguments = ["-NoProfile", "-Command", "(Get-FileHash -Algorithm SHA256 -LiteralPath '\(fileURL.path)').Hash"]
+        #else
         let tool: String
         let toolArgs: [String]
         if fileManager.isExecutableFile(atPath: "/usr/bin/shasum") || fileManager.isExecutableFile(atPath: "/bin/shasum") {
@@ -397,9 +414,10 @@ private struct BrowserStackCLIDownloader {
             tool = "sha256sum"
             toolArgs = [fileURL.path]
         }
-        let process = Process()
+        launchName = tool
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [tool] + toolArgs
+        #endif
         let out = Pipe()
         process.standardOutput = out
         let err = Pipe()
@@ -407,12 +425,12 @@ private struct BrowserStackCLIDownloader {
         do {
             try process.run()
         } catch {
-            throw PluginError("Unable to launch \(tool) to verify the downloaded archive: \(error.localizedDescription)")
+            throw PluginError("Unable to launch \(launchName) to verify the downloaded archive: \(error.localizedDescription)")
         }
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
             let message = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            throw PluginError("Failed to compute SHA-256 of the downloaded archive: \(message.isEmpty ? tool + " exited \(process.terminationStatus)" : message)")
+            throw PluginError("Failed to compute SHA-256 of the downloaded archive: \(message.isEmpty ? launchName + " exited \(process.terminationStatus)" : message)")
         }
         let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         guard let hash = output.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }).first.map(String.init), !hash.isEmpty else {
@@ -421,6 +439,7 @@ private struct BrowserStackCLIDownloader {
         return hash
     }
 
+    #if !os(Windows)
     private func extractLocalArchive(at archiveURL: URL, into directory: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
