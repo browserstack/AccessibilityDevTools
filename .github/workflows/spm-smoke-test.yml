@@ -151,9 +151,14 @@ jobs:
           sleep 1
           BASE="http://127.0.0.1:8799/asset.zip"
           pass=0; fail=0
+          # NOTE: GitHub's default `shell: bash -e {0}` injects -e, which `set -uo
+          # pipefail` does not undo. verify_binary_integrity intentionally returns
+          # non-zero on the fail-closed cases, so capture rc with `&& rc=0 || rc=$?`
+          # rather than `; rc=$?` — the latter aborts the whole step under -e before
+          # the `[ "$fail" -eq 0 ]` gate at the end ever runs.
           check() { local d="$1" erc="$2" ez="$3" url="$4" out rc z
             cp good.zip z.zip
-            out=$(verify_binary_integrity z.zip "$url" 2>&1); rc=$?
+            out=$(verify_binary_integrity z.zip "$url" 2>&1) && rc=0 || rc=$?
             z=gone; [ -f z.zip ] && z=kept
             if [ "$rc" = "$erc" ] && [ "$z" = "$ez" ]; then echo "PASS | $d | rc=$rc zip=$z"; pass=$((pass+1))
             else echo "FAIL | $d | got rc=$rc zip=$z want rc=$erc zip=$ez | $out"; fail=$((fail+1)); fi
@@ -197,7 +202,11 @@ jobs:
           fi
           sum_url="${resolved%%\?*}.sha256"
           code=$(curl -fsSL -o body.txt -w '%{http_code}' "$sum_url" || echo 000)
-          first=$(awk '{print $1; exit}' body.txt 2>/dev/null | tr 'A-Z' 'a-z')
+          # `|| true`: on the expected 403 (server half not shipped) curl writes no
+          # body.txt, so awk exits non-zero and pipefail propagates it — which under
+          # the GHA-injected `bash -e` would abort the step and turn this advisory
+          # ::warning into a red check. Keep it advisory until the sidecars ship.
+          first=$(awk '{print $1; exit}' body.txt 2>/dev/null | tr 'A-Z' 'a-z' || true)
           if [ "$code" = "200" ] && printf '%s' "$first" | grep -Eq '^[0-9a-f]{64}$'; then
             echo "Sidecar published and well-formed at ${sum_url}"
           else
