@@ -216,7 +216,10 @@ verify_binary_integrity() {
     echo "CLI download: could not resolve asset URL; skipping integrity check (DEVA11Y-473/474)." >&2
     return 0
   fi
-  sum_url="${resolved_url}.sha256"
+  # Derive the sidecar from the asset path only. Stripping any query string keeps
+  # signed/presigned URLs (…zip?token=) from deriving a permanently-404 sidecar
+  # (…zip?token=.sha256), which would silently disable verification.
+  sum_url="${resolved_url%%\?*}.sha256"
   tmp_sum=$(mktemp "${TMPDIR:-/tmp}/bs-a11y-clisum.XXXXXX") || return 0
   # shellcheck disable=SC2064
   trap "rm -f -- '${tmp_sum}'" RETURN
@@ -224,8 +227,8 @@ verify_binary_integrity() {
     echo "CLI download: no published checksum at ${sum_url}; proceeding WITHOUT integrity verification (DEVA11Y-473/474)." >&2
     return 0
   fi
-  expected=$(awk '{print $1; exit}' "$tmp_sum")
-  actual=$(_self_update_sha256 "$zip_path")
+  expected=$(awk '{print $1; exit}' "$tmp_sum" | tr 'A-Z' 'a-z')
+  actual=$(_self_update_sha256 "$zip_path" | tr 'A-Z' 'a-z')
   if [[ -z "$expected" || -z "$actual" || "$expected" != "$actual" ]]; then
     echo "CLI download: checksum mismatch; refusing to use the downloaded binary." >&2
     echo "  expected: ${expected:-<empty>}" >&2
@@ -237,7 +240,7 @@ verify_binary_integrity() {
 
 download_binary() {
   local resolved_url
-  resolved_url=$(curl -R -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || {
+  resolved_url=$(curl -fR -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || {
     echo "CLI download failed." >&2
     return 1
   }

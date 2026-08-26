@@ -344,7 +344,14 @@ private struct BrowserStackCLIDownloader {
     /// non-breaking until the SDK-assets team ships the sidecars (the server-side half of the
     /// fix). This is a download-integrity check, NOT an authenticity signature.
     private func verifyArchiveChecksum(archiveURL: URL, resolvedURL: URL) async throws {
-        guard let sidecarURL = URL(string: resolvedURL.absoluteString + ".sha256") else {
+        // Derive the sidecar from the asset's scheme/host/path only. Stripping any query
+        // string keeps signed/presigned URLs (…zip?token=) from deriving a permanently-404
+        // sidecar (…zip?token=.sha256), which would silently disable verification.
+        var sidecarComponents = URLComponents(url: resolvedURL, resolvingAgainstBaseURL: false)
+        sidecarComponents?.query = nil
+        sidecarComponents?.fragment = nil
+        guard let strippedURL = sidecarComponents?.url,
+              let sidecarURL = URL(string: strippedURL.absoluteString + ".sha256") else {
             Diagnostics.remark("BrowserStackAccessibilityLint: could not derive checksum URL; skipping integrity check (DEVA11Y-473/474).")
             return
         }
