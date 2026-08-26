@@ -190,8 +190,46 @@ strip_quarantine() {
   fi
 }
 
+# DEVA11Y-473/474: verify the downloaded CLI archive against a server-published
+# SHA-256 sidecar before extracting and executing it. api.browserstack.com (the
+# control plane) 302-redirects to a versioned, immutable asset on the CDN/S3 (the
+# data plane); a checksum published next to that asset lets us detect a tampered
+# or corrupted binary before `chmod 0755` + exec. Semantics mirror self-update:
+# fail CLOSED on a checksum mismatch, fail OPEN (warn + proceed) when no sidecar
+# is published yet, so this stays non-breaking until the SDK-assets team ships the
+# sidecars (the server-side half of DEVA11Y-473/474).
+verify_binary_integrity() {
+  local zip_path="$1" resolved_url="$2" sum_url tmp_sum expected actual
+  if [[ -z "$resolved_url" ]]; then
+    echo "CLI download: could not resolve asset URL; skipping integrity check (DEVA11Y-473/474)." >&2
+    return 0
+  fi
+  sum_url="${resolved_url}.sha256"
+  tmp_sum=$(mktemp "${TMPDIR:-/tmp}/bs-a11y-clisum.XXXXXX") || return 0
+  # shellcheck disable=SC2064
+  trap "rm -f -- '${tmp_sum}'" RETURN
+  if ! curl -fsSL --connect-timeout 10 --max-time 30 "$sum_url" -o "$tmp_sum" 2>/dev/null; then
+    echo "CLI download: no published checksum at ${sum_url}; proceeding WITHOUT integrity verification (DEVA11Y-473/474)." >&2
+    return 0
+  fi
+  expected=$(awk '{print $1; exit}' "$tmp_sum")
+  actual=$(_self_update_sha256 "$zip_path")
+  if [[ -z "$expected" || -z "$actual" || "$expected" != "$actual" ]]; then
+    echo "CLI download: checksum mismatch; refusing to use the downloaded binary." >&2
+    echo "  expected: ${expected:-<empty>}" >&2
+    echo "  actual:   ${actual:-<empty>}" >&2
+    rm -f -- "$zip_path"
+    return 2
+  fi
+}
+
 download_binary() {
-  curl -R -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH"
+  local resolved_url
+  resolved_url=$(curl -R -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || {
+    echo "CLI download failed." >&2
+    return 1
+  }
+  verify_binary_integrity "$BINARY_ZIP_PATH" "$resolved_url" || return $?
   bsdtar -xvf "$BINARY_ZIP_PATH" -O > "$BINARY_PATH" && chmod 0755 "$BINARY_PATH" && strip_quarantine
 }
 
@@ -215,5 +253,7 @@ if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   exit 0
 fi
 
-download_binary
+# Abort before executing the CLI if the download or its integrity check failed
+# (checksum mismatch returns 2 from download_binary -> DEVA11Y-473/474).
+download_binary || exit $?
 a11y_scan

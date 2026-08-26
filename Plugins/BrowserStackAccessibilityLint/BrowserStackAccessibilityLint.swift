@@ -245,18 +245,24 @@ private struct BrowserStackCLIDownloader {
 
         Diagnostics.remark("BrowserStackAccessibilityLint: Downloading CLI \(info.version)...")
 
-        #if os(Windows)
         // Download the archive to a sibling temp file *outside* the staging directory so a
-        // failed cleanup (e.g. an AV scanner or indexer holding a handle on Windows) can
-        // never bake the .zip into the published version directory. A leftover is a `.tmp.*`
-        // sibling that sweepStaleStaging reclaims later.
+        // failed cleanup (e.g. an AV scanner or indexer holding a handle) can never bake the
+        // .zip into the published version directory, and — crucially (DEVA11Y-473/474) — so we
+        // can verify the archive's integrity before it is extracted, made executable, and run.
+        // A leftover is a `.tmp.*` sibling that sweepStaleStaging reclaims later.
         let archiveURL = cacheRoot.appendingPathComponent(".tmp.\(info.version).\(UUID().uuidString).zip")
         defer { try? fileManager.removeItem(at: archiveURL) }
         try await download(from: info.resolvedURL, to: archiveURL)
+        #if !os(Windows)
+        // Verify BEFORE extraction/exec. Streaming curl | bsdtar straight to disk (the old
+        // path) left no opportunity to check the payload; downloading to a file first does.
+        try await verifyArchiveChecksum(archiveURL: archiveURL, resolvedURL: info.resolvedURL)
+        #endif
         Diagnostics.remark("BrowserStackAccessibilityLint: Extracting CLI \(info.version)...")
+        #if os(Windows)
         try unzip(archive: archiveURL, into: stagingDirectory)
         #else
-        try extractWithBsdtar(from: info.resolvedURL, into: stagingDirectory)
+        try extractLocalArchive(at: archiveURL, into: stagingDirectory)
         #endif
 
         // Normalise the binary to the expected name *inside* the staging directory so the
@@ -329,58 +335,83 @@ private struct BrowserStackCLIDownloader {
     }
 
 #if !os(Windows)
-    private func extractWithBsdtar(from url: URL, into directory: URL) throws {
-        if url.isFileURL {
-            try extractLocalArchive(at: url, into: directory)
-        } else {
-            try extractRemoteArchive(from: url, into: directory)
+    /// DEVA11Y-473/474: verify the downloaded CLI archive against a server-published
+    /// SHA-256 sidecar (`<asset>.sha256`) before it is extracted, made executable and run.
+    /// api.browserstack.com (control plane) 302-redirects to a versioned, immutable asset on
+    /// the CDN/S3 (data plane); a checksum published next to that asset lets us detect a
+    /// tampered or corrupted binary. Semantics mirror the launcher self-update: fail CLOSED on
+    /// a mismatch, fail OPEN (warn + proceed) when no sidecar is published yet, so this is
+    /// non-breaking until the SDK-assets team ships the sidecars (the server-side half of the
+    /// fix). This is a download-integrity check, NOT an authenticity signature.
+    private func verifyArchiveChecksum(archiveURL: URL, resolvedURL: URL) async throws {
+        guard let sidecarURL = URL(string: resolvedURL.absoluteString + ".sha256") else {
+            Diagnostics.remark("BrowserStackAccessibilityLint: could not derive checksum URL; skipping integrity check (DEVA11Y-473/474).")
+            return
+        }
+        var request = URLRequest(url: sidecarURL)
+        request.httpShouldHandleCookies = false
+        request.timeoutInterval = 30
+        let body: Data
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                Diagnostics.remark("BrowserStackAccessibilityLint: no published checksum at \(sidecarURL.absoluteString); proceeding WITHOUT integrity verification (DEVA11Y-473/474).")
+                return
+            }
+            body = data
+        } catch {
+            Diagnostics.remark("BrowserStackAccessibilityLint: checksum fetch failed (\(error.localizedDescription)); proceeding WITHOUT integrity verification (DEVA11Y-473/474).")
+            return
+        }
+        // A published sidecar that is present but empty/unreadable is treated as a hard failure:
+        // once the server publishes checksums, a missing value must not silently downgrade to
+        // "no verification".
+        guard let text = String(data: body, encoding: .utf8),
+              let expected = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }).first.map(String.init),
+              !expected.isEmpty else {
+            throw PluginError("BrowserStack CLI checksum sidecar was empty or unreadable; refusing to use the downloaded binary.")
+        }
+        let actual = try sha256Hex(of: archiveURL)
+        guard actual.caseInsensitiveCompare(expected) == .orderedSame else {
+            throw PluginError("BrowserStack CLI checksum mismatch; refusing to use the downloaded binary.\n  expected: \(expected)\n  actual:   \(actual)")
         }
     }
 
-    private func extractRemoteArchive(from url: URL, into directory: URL) throws {
-        let pipe = Pipe()
-
-        let curl = Process()
-        curl.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        curl.arguments = ["curl", "-fsSL", url.absoluteString]
-        curl.standardOutput = pipe
-        let curlError = Pipe()
-        curl.standardError = curlError
-
-        let bsdtar = Process()
-        bsdtar.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        bsdtar.arguments = ["bsdtar", "-xpf", "-", "-C", directory.path]
-        bsdtar.standardInput = pipe
-        let tarError = Pipe()
-        bsdtar.standardError = tarError
-
+    /// SHA-256 of a file as a lowercase hex string, via the platform `shasum`/`sha256sum`
+    /// tool. Matches the launcher scripts and avoids pulling CryptoKit/swift-crypto into the
+    /// plugin (CryptoKit is Apple-only; this path also serves Linux).
+    private func sha256Hex(of fileURL: URL) throws -> String {
+        let tool: String
+        let toolArgs: [String]
+        if fileManager.isExecutableFile(atPath: "/usr/bin/shasum") || fileManager.isExecutableFile(atPath: "/bin/shasum") {
+            tool = "shasum"
+            toolArgs = ["-a", "256", fileURL.path]
+        } else {
+            tool = "sha256sum"
+            toolArgs = [fileURL.path]
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [tool] + toolArgs
+        let out = Pipe()
+        process.standardOutput = out
+        let err = Pipe()
+        process.standardError = err
         do {
-            try bsdtar.run()
+            try process.run()
         } catch {
-            throw PluginError("Unable to launch bsdtar: \(error.localizedDescription)")
+            throw PluginError("Unable to launch \(tool) to verify the downloaded archive: \(error.localizedDescription)")
         }
-
-        do {
-            try curl.run()
-        } catch {
-            bsdtar.terminate()
-            bsdtar.waitUntilExit()
-            throw PluginError("Unable to launch curl: \(error.localizedDescription)")
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let message = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw PluginError("Failed to compute SHA-256 of the downloaded archive: \(message.isEmpty ? tool + " exited \(process.terminationStatus)" : message)")
         }
-
-        curl.waitUntilExit()
-        pipe.fileHandleForWriting.closeFile()
-        bsdtar.waitUntilExit()
-
-        if curl.terminationStatus != 0 {
-            let message = String(data: curlError.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            forwardExit(code: curl.terminationStatus, message: message)
+        let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard let hash = output.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }).first.map(String.init), !hash.isEmpty else {
+            throw PluginError("Could not parse SHA-256 output for the downloaded archive.")
         }
-
-        guard bsdtar.terminationReason == .exit, bsdtar.terminationStatus == 0 else {
-            let message = String(data: tarError.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            forwardExit(code: bsdtar.terminationStatus, message: message.isEmpty ? "bsdtar failed to extract BrowserStack CLI." : message)
-        }
+        return hash
     }
 
     private func extractLocalArchive(at archiveURL: URL, into directory: URL) throws {
@@ -514,7 +545,6 @@ private struct BrowserStackCLIDownloader {
         return finalURL
     }
 
-    #if os(Windows)
     private func download(from url: URL, to destination: URL) async throws {
         if url.isFileURL {
             if fileManager.fileExists(atPath: destination.path) {
@@ -534,6 +564,7 @@ private struct BrowserStackCLIDownloader {
         try fileManager.moveItem(at: tempURL, to: destination)
     }
 
+    #if os(Windows)
     private func unzip(archive: URL, into destination: URL) throws {
         let powershell = Process()
         powershell.executableURL = URL(fileURLWithPath: "powershell")
