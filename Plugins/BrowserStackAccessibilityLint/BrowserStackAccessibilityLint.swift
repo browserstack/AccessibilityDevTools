@@ -172,6 +172,7 @@ private struct BrowserStackCLIDownloader {
 
     // Decompression-bomb guards (DEVA11Y-484). The CLI binary is a few tens of MB; these
     // ceilings leave generous headroom while bounding a malicious archive's footprint.
+    private static let maxCompressedBytes: Int64 = 100 * 1024 * 1024   // 100 MB on the wire
     private static let maxDecompressedBytes: Int64 = 200 * 1024 * 1024  // 200 MB on disk
     private static let maxArchiveEntries = 10_000
 
@@ -599,8 +600,33 @@ private struct BrowserStackCLIDownloader {
 
         let (tempURL, response) = try await URLSession.shared.download(from: url)
         if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
+            try? fileManager.removeItem(at: tempURL)
             throw PluginError("Failed to download BrowserStack CLI (HTTP \(httpResponse.statusCode)).")
         }
+
+        // Compressed-size cap (DEVA11Y-484 review). Without it a multi-GB *compressed*
+        // payload from an attacker-controlled URL (BROWSERSTACK_A11Y_CLI_DOWNLOAD_URL) is
+        // checksummed and handed to the extraction guard, which only ever bounds the
+        // *decompressed* footprint — so the archive itself is an unbounded surface.
+        //
+        // LIMITATION, stated plainly: URLSession.download(from:) has no byte-level hook, so
+        // these checks reject the archive *after* the transfer rather than aborting it
+        // mid-stream. They therefore prevent an oversized archive from being verified,
+        // extracted, published or executed, but they do NOT bound peak temporary disk during
+        // the transfer itself. Bounding that needs a URLSessionDownloadDelegate that cancels
+        // in didWriteData — deliberately left as a separate change (DEVA11Y-761) rather than
+        // rewriting this shared download path here. The shell launchers do abort pre-transfer,
+        // via curl --max-filesize.
+        if response.expectedContentLength > Self.maxCompressedBytes {
+            try? fileManager.removeItem(at: tempURL)
+            throw PluginError("BrowserStack CLI archive declares \(response.expectedContentLength) bytes, above the \(Self.maxCompressedBytes)-byte limit; refusing to download it.")
+        }
+        let downloadedBytes = (try? fileManager.attributesOfItem(atPath: tempURL.path)[.size] as? Int64) ?? nil
+        if let downloadedBytes, downloadedBytes > Self.maxCompressedBytes {
+            try? fileManager.removeItem(at: tempURL)
+            throw PluginError("BrowserStack CLI archive is \(downloadedBytes) bytes, above the \(Self.maxCompressedBytes)-byte limit; refusing to use it.")
+        }
+
         if fileManager.fileExists(atPath: destination.path) {
             try fileManager.removeItem(at: destination)
         }
@@ -821,12 +847,17 @@ private let browserstackCLIPermissionDeniedExitCode: Int32 = 4
 // entry ceiling (the entry ceiling stops a "millions of tiny files" bomb that stays
 // small on disk).
 //
+// Containment assumption (load-bearing): `bsdtar -x` WITHOUT `-P` neutralises `..`,
+// absolute paths and symlink-through, so every write lands inside the `-C` directory we
+// poll. Adding `-P` would let writes escape that directory and the footprint poll would
+// measure nothing — do not add it (DEVA11Y-484 review).
+//
 // Applies to extractLocalArchive, which since #37 (DEVA11Y-473/474) is the single
 // non-Windows extraction path: the archive is downloaded to a file and checksum-
 // verified first, then extracted. Windows' unzip path has no streaming guard.
 
 /// Thread-safe flag shared between the extraction watchdog and the main flow.
-final class ExtractionLimitState {
+private final class ExtractionLimitState {
     private let lock = NSLock()
     private var didExceed = false
     private var why = ""
@@ -854,10 +885,16 @@ final class ExtractionLimitState {
 }
 
 /// Total bytes and entry count of all regular files under `url`.
-func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int) {
+private func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int) {
     let fm = FileManager.default
+    // `.skipsHiddenFiles` is deliberately NOT set, so the entry count here matches what
+    // bsdtar actually wrote — including dotfiles. locateExecutable skips hidden files
+    // because it is searching for a binary, not measuring a footprint; the two use the
+    // same ceiling but count deliberately different things (DEVA11Y-484 review).
     guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) else {
-        return (0, 0)
+        // Fail CLOSED: a directory we just created being unreadable is not a "0 bytes"
+        // result, and returning (0, 0) would silently disable the guard for that poll.
+        return (Int64.max, Int.max)
     }
     var total: Int64 = 0
     var count = 0
@@ -872,7 +909,7 @@ func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int) {
 }
 
 /// Returns a rejection reason if the footprint under `directory` exceeds either ceiling.
-func footprintExceeded(at directory: URL, maxBytes: Int64, maxEntries: Int) -> String? {
+private func footprintExceeded(at directory: URL, maxBytes: Int64, maxEntries: Int) -> String? {
     let footprint = extractionFootprint(at: directory)
     if footprint.bytes > maxBytes {
         return "decompressed size exceeds \(maxBytes / (1024 * 1024)) MB"
@@ -887,12 +924,12 @@ func footprintExceeded(at directory: URL, maxBytes: Int64, maxEntries: Int) -> S
 /// footprint in `directory` exceeds the byte or entry ceiling.
 ///
 /// This is a SOFT ceiling: bsdtar can write up to one poll interval's worth of data past
-/// the limit before it is killed, so peak disk use is roughly `maxBytes + (pollInterval ×
-/// disk write rate)`. The goal is to prevent disk *exhaustion* by a multi-GB/TB bomb, not
-/// to enforce an exact byte count. The interval is kept short to bound the overshoot.
+/// the limit before it is killed, so peak disk use is roughly `maxBytes + (50 ms × disk
+/// write rate)` — the poll interval below is 50 ms. The goal is to prevent disk
+/// *exhaustion* by a multi-GB/TB bomb, not to enforce an exact byte count.
 /// Callers MUST also run `footprintExceeded` once the process exits, to catch a fast bomb
 /// that finished within a single poll interval.
-func startExtractionWatchdog(on process: Process, directory: URL, maxBytes: Int64, maxEntries: Int) -> ExtractionLimitState {
+private func startExtractionWatchdog(on process: Process, directory: URL, maxBytes: Int64, maxEntries: Int) -> ExtractionLimitState {
     let state = ExtractionLimitState()
     let watchdog = Thread {
         while process.isRunning {

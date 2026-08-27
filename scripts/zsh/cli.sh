@@ -252,13 +252,30 @@ verify_binary_integrity() {
 }
 
 download_binary() {
+  local max_compressed=104857600   # 100 MB cap on the compressed download
   local max_decompressed=209715200 # 200 MB cap on the decompressed binary
 
+  # --max-filesize aborts the transfer once the declared size is known to exceed the cap.
+  # Measured against this endpoint (which 302s to sdk-assets), curl bails with a non-zero
+  # exit and nothing written to disk. curl documents the flag as a no-op when the length is
+  # unknown (chunked responses), so the explicit size check below backstops that case —
+  # otherwise an attacker-controlled endpoint could exhaust the disk during download, before
+  # the checksum and the decompression guard ever run (DEVA11Y-484 review).
   local resolved_url
-  resolved_url=$(curl -fR -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || {
-    echo "CLI download failed." >&2
+  resolved_url=$(curl -fR --max-filesize "$max_compressed" -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || {
+    echo "CLI download failed or exceeds the maximum allowed download size (100 MB)." >&2
+    rm -f "$BINARY_ZIP_PATH"
     return 1
   }
+
+  local compressed_size
+  compressed_size=$(wc -c < "$BINARY_ZIP_PATH" 2>/dev/null || echo 0)
+  if [[ $compressed_size -gt $max_compressed ]]; then
+    echo "BrowserStack CLI archive exceeds the maximum allowed download size (100 MB). Aborting." >&2
+    rm -f "$BINARY_ZIP_PATH"
+    return 1
+  fi
+
   verify_binary_integrity "$BINARY_ZIP_PATH" "$resolved_url" || return $?
 
   # Extract to a temp path and atomically publish it. `> "$BINARY_PATH"` truncates the
@@ -271,10 +288,15 @@ download_binary() {
   # bsdtar via SIGPIPE once the decompressed output reaches the cap, and pipefail surfaces
   # that as a failure. Because the cap applies to ${BINARY_PATH}.tmp and publication is a
   # later mv, a rejected bomb leaves any previously-cached binary untouched.
+  # Save and restore pipefail rather than clearing it: these scripts do not enable it
+  # globally today, but unconditionally turning it off would silently disable it for
+  # everything after download_binary if they ever do (DEVA11Y-484 review).
+  local pipefail_was_set=0
+  case "$(set +o)" in *"-o pipefail"*) pipefail_was_set=1 ;; esac
   set -o pipefail
   bsdtar -xvf "$BINARY_ZIP_PATH" -O | head -c "$max_decompressed" > "${BINARY_PATH}.tmp"
   local extract_status=$?
-  set +o pipefail
+  [[ $pipefail_was_set -eq 1 ]] || set +o pipefail
 
   local extracted_size
   extracted_size=$(wc -c < "${BINARY_PATH}.tmp" 2>/dev/null || echo 0)
@@ -284,9 +306,14 @@ download_binary() {
     return 1
   fi
 
-  chmod 0755 "${BINARY_PATH}.tmp" \
-    && mv -f "${BINARY_PATH}.tmp" "$BINARY_PATH" \
-    && strip_quarantine
+  # Clean the staged file up on *any* failure below, not just the size rejection above,
+  # so a failed chmod/mv never leaves a stray ${BINARY_PATH}.tmp in the cache.
+  if ! { chmod 0755 "${BINARY_PATH}.tmp" && mv -f "${BINARY_PATH}.tmp" "$BINARY_PATH"; }; then
+    echo "BrowserStack CLI: failed to publish the downloaded binary." >&2
+    rm -f "${BINARY_PATH}.tmp"
+    return 1
+  fi
+  strip_quarantine
 }
 
 # Self-update is opt-in (DEVA11Y-475): it runs only via the explicit `self-update`
