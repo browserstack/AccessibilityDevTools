@@ -1,0 +1,21 @@
+# Dependabot configuration.
+#
+# Keeps the digest-pinned Semgrep CI container image current (DEVA11Y-476 / chain
+# DEVA11Y-485). The image in .github/workflows/Semgrep.yml is pinned to an immutable
+# @sha256 digest for supply-chain integrity; a static digest never receives upstream
+# security patches, so Dependabot's `docker` ecosystem watches the image reference in
+# the workflow's job-level `container:` and opens PRs that bump the pin to the newest
+# digest as returntocorp/semgrep is rebuilt.
+version: 2
+updates:
+  # Docker image references in GitHub Actions workflow files (job `container:` / `services:`).
+  - package-ecosystem: "docker"
+    directory: "/.github/workflows"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+      - "security"
+    open-pull-requests-limit: 5
