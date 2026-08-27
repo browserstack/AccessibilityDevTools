@@ -455,7 +455,7 @@ private struct BrowserStackCLIDownloader {
         let limitState: ExtractionLimitState
         do {
             try process.run()
-            // Decompressed-size/entry guard (DEVA11Y-484): same rationale as the remote path.
+            // Decompressed-size/entry guard (DEVA11Y-484); see the EXTRACTION GUARD block below.
             limitState = startExtractionWatchdog(on: process, directory: directory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries)
             process.waitUntilExit()
         } catch {
@@ -814,11 +814,16 @@ private let browserstackCLIPermissionDeniedExitCode: Int32 = 4
 
 // === DEVA11Y-484 EXTRACTION GUARD ===
 //
-// Rationale: bsdtar writes decompressed bytes straight to disk, so a cap on the
-// curl→bsdtar pipe would only bound the *compressed* size — useless against a
-// decompression bomb. Instead we poll the destination directory while bsdtar runs
-// and terminate it if the decompressed footprint crosses a byte OR entry ceiling
-// (the entry ceiling stops a "millions of tiny files" bomb that stays small on disk).
+// Rationale: bsdtar writes decompressed bytes straight to disk, so bounding the
+// archive's *compressed* size says nothing about how much it expands to — useless
+// against a decompression bomb. Instead we poll the destination directory while
+// bsdtar runs and terminate it if the decompressed footprint crosses a byte OR
+// entry ceiling (the entry ceiling stops a "millions of tiny files" bomb that stays
+// small on disk).
+//
+// Applies to extractLocalArchive, which since #37 (DEVA11Y-473/474) is the single
+// non-Windows extraction path: the archive is downloaded to a file and checksum-
+// verified first, then extracted. Windows' unzip path has no streaming guard.
 
 /// Thread-safe flag shared between the extraction watchdog and the main flow.
 final class ExtractionLimitState {
