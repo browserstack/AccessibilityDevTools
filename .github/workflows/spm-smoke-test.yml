@@ -1,0 +1,124 @@
+# Smoke-tests the `a11y-scan` SwiftPM command plugin end-to-end on every PR:
+# builds the plugin and runs a real accessibility scan against the tests/spm
+# harness (sample SwiftUI sources with intentional a11y issues). It reuses the
+# repository's own gated integration test (testA11yScanPluginRuns) so the scan
+# invocation stays defined in exactly one place.
+#
+# The scan downloads the BrowserStack CLI and makes authenticated network calls,
+# so it needs BROWSERSTACK_USERNAME / BROWSERSTACK_ACCESS_KEY repo secrets. Those
+# secrets are never exposed to fork PRs, so that job is gated to same-repo PRs
+# (and manual dispatch); fork PRs skip it. The scan step is itself guarded on the
+# secrets being present, so if they are not configured the scan is skipped and the
+# job still passes on the build step alone.
+#
+# A second job (scripts-lint) syntax-checks every launcher script under scripts/.
+# It needs no secrets, so it runs on all PRs including forks.
+name: SPM plugin smoke test
+
+on:
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spm-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spm-smoke:
+    name: a11y-scan end-to-end (SwiftPM)
+    runs-on: macos-14
+    timeout-minutes: 25
+    # Secrets are unavailable to fork PRs, so the authenticated scan can only run
+    # on same-repo PRs or a manual dispatch. Fork PRs skip this job.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.fork == false
+    env:
+      BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
+      BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
+      # Un-gates tests/spm/Tests/A11yDemoLibTests/testA11yScanPluginRuns, which is
+      # skipped unless RUN_A11Y_SCAN=1 and BrowserStack credentials are present.
+      RUN_A11Y_SCAN: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Swift toolchain
+        run: swift --version
+
+      # The repo root is a plugin-only package (no buildable target), so it is
+      # not built directly. Building the tests/spm harness compiles both the
+      # a11y-scan command plugin (via the path dependency) and the sample sources.
+      - name: Build harness (compiles the a11y-scan plugin)
+        working-directory: tests/spm
+        run: swift build
+
+      # Guarded on the secrets actually being set: GitHub exposes an unset secret
+      # as an empty string (present, not nil), so without this guard the scan would
+      # run with empty credentials and fail. When the secrets are absent this step
+      # is skipped and the job stays green on the build step alone.
+      #
+      # The scan hits BrowserStack (network + auth + CLI download), so a transient
+      # upstream hiccup should not red-block a PR. Retry the scan up to 3 times with
+      # backoff; a consistent failure still fails the gate. `swift test` reuses the
+      # first attempt's build, so retries only re-run the scan.
+      - name: End-to-end scan smoke (tests/spm)
+        if: env.BROWSERSTACK_USERNAME != '' && env.BROWSERSTACK_ACCESS_KEY != ''
+        working-directory: tests/spm
+        run: |
+          set -uo pipefail
+          attempts=3
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::a11y-scan smoke attempt $i/$attempts"
+            if swift test; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            if [ "$i" -lt "$attempts" ]; then
+              echo "Attempt $i failed; retrying in 20s (occasional transient upstream failures are expected)."
+              sleep 20
+            fi
+          done
+          echo "::error::a11y-scan smoke failed after $attempts attempts."
+          exit 1
+
+  scripts-lint:
+    name: Launcher scripts (bash syntax)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Every script under scripts/ — the bash, zsh and fish variants alike — is
+      # a bash script (`#!/usr/bin/env bash -il`); the variants differ only in which
+      # login shell they source BrowserStack creds from. So all of them are
+      # syntax-checked with `bash -n`. The scripts self-update, register git
+      # hooks and need credentials, so they are not executed here — this is a
+      # static syntax gate. (Checksum integrity is covered separately by
+      # verify-selfupdate-checksums.yml.)
+      - name: Syntax-check all launcher scripts (bash -n)
+        run: |
+          set -uo pipefail
+          shopt -s globstar nullglob
+          scripts=(scripts/**/*.sh)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "::error::No .sh scripts found under scripts/ — checkout or glob is wrong."
+            exit 1
+          fi
+          status=0
+          for script in "${scripts[@]}"; do
+            # Plain log lines, not ::notice file=/::error file= workflow commands:
+            # scripts/ filenames are attacker-controllable on fork PRs, and
+            # interpolating them into a workflow command is an injection vector.
+            if bash -n "$script"; then
+              echo "OK      $script"
+            else
+              echo "FAILED  $script (bash -n syntax error above)"
+              status=1
+            fi
+          done
+          exit "$status"

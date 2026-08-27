@@ -89,12 +89,115 @@ a11y_scan() {
       $BINARY_PATH a11y $EXTRA_ARGS
 }
 
-script_self_update() {
-  local remote_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/main/scripts/zsh/cli.sh"
+# Self-update pulls the latest launcher from `main` on demand: it runs only via
+# the explicit `self-update` subcommand (DEVA11Y-475), not automatically on every
+# invocation. DEVA11Y-477/478: when it does run we deliberately follow main HEAD
+# rather than a pinned revision (per maintainer intent: take the latest on demand).
+# Hardening retained from the pinning work: download to a temp dir, verify a
+# SHA-256 sidecar (a download-integrity check, NOT an authenticity signature --
+# script and checksum share one origin), sanity-check the shebang, then
+# atomically replace the on-disk script. Keep scripts/zsh/cli.sh.sha256 on main in
+# sync with this file (regenerate on every change) or updates will abort.
+SELF_UPDATE_BRANCH="main"
+readonly SELF_UPDATE_BRANCH
+SELF_UPDATE_RELPATH="scripts/zsh/cli.sh"
+readonly SELF_UPDATE_RELPATH
 
-  updated_script=$(curl -R -z "$SCRIPT_PATH" "$remote_url")
-  if [[ $updated_script =~ ^#! ]]; then
-    echo "$updated_script" > "$SCRIPT_PATH"
+# sha256 with a portable fallback: GNU `sha256sum` (Linux) or `shasum -a 256`
+# (macOS / Perl Digest::SHA).
+_self_update_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+script_self_update() {
+  local base_url="https://raw.githubusercontent.com/browserstack/AccessibilityDevTools/refs/heads/${SELF_UPDATE_BRANCH}/${SELF_UPDATE_RELPATH}"
+  local tmp_dir tmp_script tmp_sum expected_sum actual_sum local_sum target_path stage_file
+
+  # Resolve the on-disk target absolutely so the replace never depends on CWD.
+  if [[ -n "$GIT_ROOT" && "$SCRIPT_PATH" != /* ]]; then
+    target_path="${GIT_ROOT}/${SCRIPT_PATH}"
+  else
+    target_path="$SCRIPT_PATH"
+  fi
+
+  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/bs-a11y-selfupdate.XXXXXX") || {
+    echo "Self-update: failed to create temp dir." >&2
+    return 1
+  }
+  # Clean the work dir and any half-written staged file so an interrupt between
+  # staging and the final mv can't leak a dotfile in the target directory. The
+  # RETURN trap also clears the signal traps so they don't linger past this
+  # function (which would otherwise swallow Ctrl-C during the main command).
+  # tmp_dir is expanded now; stage_file is expanded when the trap fires (escaped $).
+  # shellcheck disable=SC2064
+  trap "rm -rf -- '${tmp_dir}'; rm -f -- \"\${stage_file:-}\"; trap - INT TERM" RETURN
+  # shellcheck disable=SC2064
+  trap "rm -rf -- '${tmp_dir}'; rm -f -- \"\${stage_file:-}\"; exit 130" INT TERM
+  tmp_script="${tmp_dir}/cli.sh"
+  tmp_sum="${tmp_dir}/cli.sh.sha256"
+
+  # Fetch the checksum first; if our on-disk copy already matches, we're current.
+  if ! curl -fsSL --connect-timeout 10 --max-time 30 "${base_url}.sha256" -o "$tmp_sum"; then
+    echo "Self-update: could not fetch checksum from ${SELF_UPDATE_BRANCH}; skipping update." >&2
+    return 0
+  fi
+  # Published sidecar is "<sha256>  <filename>"; take the first field.
+  expected_sum=$(awk '{print $1; exit}' "$tmp_sum")
+  if [[ -f "$target_path" ]]; then
+    local_sum=$(_self_update_sha256 "$target_path")
+    if [[ -n "$expected_sum" && "$local_sum" == "$expected_sum" ]]; then
+      return 0
+    fi
+  fi
+
+  if ! curl -fsSL --connect-timeout 10 --max-time 30 "$base_url" -o "$tmp_script"; then
+    echo "Self-update: could not download latest script; skipping update." >&2
+    return 0
+  fi
+
+  actual_sum=$(_self_update_sha256 "$tmp_script")
+  if [[ -z "$expected_sum" || -z "$actual_sum" || "$expected_sum" != "$actual_sum" ]]; then
+    echo "Self-update: checksum mismatch; refusing to apply." >&2
+    echo "  expected: ${expected_sum:-<empty>}" >&2
+    echo "  actual:   ${actual_sum:-<empty>}" >&2
+    # Integrity violation — distinct exit code (2) so the caller can tell this
+    # apart from a benign network skip (0) or an operational error (1).
+    return 2
+  fi
+
+  # Sanity check AFTER integrity: ensure the verified payload is a script.
+  if ! head -c2 "$tmp_script" | grep -q '^#!'; then
+    echo "Self-update: downloaded file is not a script; aborting." >&2
+    return 2
+  fi
+
+  # Stage inside the target's directory so the rename is atomic (mv across
+  # filesystems would degrade to a non-atomic copy).
+  stage_file=$(mktemp "$(dirname "$target_path")/.bs-a11y-update.XXXXXX") || {
+    echo "Self-update: failed to stage update next to ${target_path}." >&2
+    return 1
+  }
+  if cp "$tmp_script" "$stage_file" && chmod 0755 "$stage_file" && mv -f "$stage_file" "$target_path"; then
+    echo "Self-update: updated ${target_path} to latest ${SELF_UPDATE_BRANCH}."
+  else
+    rm -f -- "$stage_file"
+    echo "Self-update: failed to replace ${target_path}." >&2
+    return 1
+  fi
+}
+
+strip_quarantine() {
+  # macOS Gatekeeper refuses to run binaries carrying the com.apple.quarantine
+  # attribute unless they are Developer ID signed and notarized. Some managed
+  # environments (MDM/security tooling) stamp this attribute on network-written
+  # files, which blocks the downloaded CLI with no "Allow Anyway" option. Strip
+  # it if present. No-op on non-macOS and when the attribute is absent.
+  if [[ "$OS" == "macos" ]] && command -v xattr >/dev/null 2>&1; then
+    xattr -d com.apple.quarantine "$BINARY_PATH" 2>/dev/null || true
   fi
 }
 
@@ -119,10 +222,28 @@ download_binary() {
     exit 1
   fi
 
-  chmod 0775 "$BINARY_PATH"
+  # chmod 0755 (not 0775) and strip_quarantine both come from main (DEVA11Y-752): the
+  # size guard above exits non-zero on failure, so reaching here means extraction
+  # succeeded and the chained && from main is not needed.
+  chmod 0755 "$BINARY_PATH"
+  strip_quarantine
 }
 
-script_self_update
+# Self-update is opt-in (DEVA11Y-475): it runs only via the explicit `self-update`
+# subcommand, never automatically on every invocation. Running it unconditionally
+# before subcommand parsing meant a single compromise of the fetched source silently
+# replaced the running script on every developer's machine, with no way to opt out;
+# gating it behind an explicit command removes that always-on side-effect. Integrity
+# verification (SHA-256 check + atomic staging) still guards the download itself.
+if [[ $SUBCOMMAND == "self-update" ]]; then
+  _self_update_rc=0
+  script_self_update || _self_update_rc=$?
+  if [[ "$_self_update_rc" -eq 2 ]]; then
+    echo "Self-update: integrity verification FAILED; kept the existing verified script (possible corruption or tampering)." >&2
+  fi
+  exit "$_self_update_rc"
+fi
+
 if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   register_git_hook
   exit 0

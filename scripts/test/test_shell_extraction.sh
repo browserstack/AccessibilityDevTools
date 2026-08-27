@@ -23,10 +23,16 @@ start_server "$FIXTURES" || exit 1
 load_download_binary() {
   local variant="$1"
   local fn="$WORK/download_binary.$variant.sh"
-  awk '/^download_binary\(\) \{/{p=1} p{print} /^\}/{if(p) p=0}' "$REPO/scripts/$variant/cli.sh" > "$fn"
+  # download_binary calls strip_quarantine (DEVA11Y-752, #36), so extract that helper too.
+  # Sourcing download_binary on its own leaves strip_quarantine undefined and every
+  # success-path case exits 127 ("command not found") after a correct extraction.
+  awk '/^strip_quarantine\(\) \{/{p=1} p{print} /^\}/{if(p) p=0}' "$REPO/scripts/$variant/cli.sh" > "$fn"
+  awk '/^download_binary\(\) \{/{p=1} p{print} /^\}/{if(p) p=0}' "$REPO/scripts/$variant/cli.sh" >> "$fn"
   # Faithfulness: the extracted body must match the repo's, and must still call bsdtar+head.
   grep -q 'bsdtar -xvf "\$BINARY_ZIP_PATH" -O | head -c "\$max_decompressed"' "$fn" \
     || { bad "$variant: extracted function does not contain the guarded pipeline"; return 1; }
+  grep -q '^strip_quarantine() {' "$fn" \
+    || { bad "$variant: strip_quarantine helper was not extracted"; return 1; }
   # shellcheck disable=SC1090
   source "$fn"
 }
@@ -53,7 +59,10 @@ for variant in bash zsh fish; do
   assert_status "$LAST_STATUS" 0 "$variant legit: exits 0"
   if [ -f "$LAST_CACHE/browserstack-cli" ]; then ok "$variant legit: binary present"; else bad "$variant legit: binary missing"; fi
   perms=$(stat -f '%Lp' "$LAST_CACHE/browserstack-cli" 2>/dev/null || stat -c '%a' "$LAST_CACHE/browserstack-cli" 2>/dev/null)
-  assert_eq "$perms" "775" "$variant legit: chmod 0775 applied"
+  # 0755, not 0775: main tightened the wrappers' chmod in DEVA11Y-752 (#36), dropping
+  # group-write on the downloaded binary. This branch predates that change; the assertion
+  # was updated when main was merged in rather than reverting main's hardening.
+  assert_eq "$perms" "755" "$variant legit: chmod 0755 applied"
   "$LAST_CACHE/browserstack-cli" >/dev/null 2>&1; assert_status $? 0 "$variant legit: extracted binary runs"
 
   # 2. Decompression bomb (400 MB): aborts, partial binary removed.

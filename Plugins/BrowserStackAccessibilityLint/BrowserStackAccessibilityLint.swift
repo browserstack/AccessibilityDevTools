@@ -198,8 +198,34 @@ private struct BrowserStackCLIDownloader {
         return cacheRoot
     }
 
+    /// Best-effort removal of stale staging artifacts (`.tmp.*` files and directories) left
+    /// behind when a previous extraction was interrupted. The extract helpers call
+    /// forwardExit()/exit() on failure and SIGKILL can hit at any point, both of which
+    /// bypass the `defer` cleanup in prepareArtifact. Only entries older than one hour are
+    /// removed, so a concurrent build's in-flight staging directory is never deleted
+    /// mid-extraction.
+    private func sweepStaleStaging(in cacheRoot: URL) {
+        let staleStagingAge: TimeInterval = 3600
+        let now = Date()
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: cacheRoot,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: []
+        ) else {
+            return
+        }
+        for entry in entries where entry.lastPathComponent.hasPrefix(".tmp.") {
+            let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            guard let modified, now.timeIntervalSince(modified) > staleStagingAge else {
+                continue
+            }
+            try? fileManager.removeItem(at: entry)
+        }
+    }
+
     private func prepareArtifact(using info: ArtifactInfo) async throws -> BrowserStackCLIArtifact {
         let cacheRoot = try ensureCacheRootExists()
+        sweepStaleStaging(in: cacheRoot)
         let versionDirectory = cacheRoot.appendingPathComponent(info.version, isDirectory: true)
         let executableName = info.executableName
         let expectedExecutableURL = versionDirectory.appendingPathComponent(executableName, isDirectory: false)
@@ -208,46 +234,116 @@ private struct BrowserStackCLIDownloader {
             return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
         }
 
-        if fileManager.fileExists(atPath: versionDirectory.path) {
-            try fileManager.removeItem(at: versionDirectory)
-        }
-        try fileManager.createDirectory(at: versionDirectory, withIntermediateDirectories: true)
+        // Extract into a unique staging directory and atomically publish it to the final
+        // version directory (DEVA11Y-482). The previous check-delete-recreate sequence was
+        // a TOCTOU: two concurrent builds sharing ~/.cache could both fall through the
+        // isExecutableFile check, then one instance's removeItem/createDirectory would wipe
+        // the other's in-progress extraction, corrupting the binary or leaving a partial
+        // file that locateExecutable's fallback would happily run. Staging + rename means a
+        // version directory only ever becomes visible fully-formed, and a loser of the
+        // publish race reuses the winner's binary instead of clobbering it.
+        let stagingDirectory = cacheRoot.appendingPathComponent(
+            ".tmp.\(info.version).\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? fileManager.removeItem(at: stagingDirectory) }
+        try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
 
         Diagnostics.remark("BrowserStackAccessibilityLint: Downloading CLI \(info.version)...")
 
         #if os(Windows)
-        let archiveURL = versionDirectory.appendingPathComponent("browserstack-cli.zip")
+        // Download the archive to a sibling temp file *outside* the staging directory so a
+        // failed cleanup (e.g. an AV scanner or indexer holding a handle on Windows) can
+        // never bake the .zip into the published version directory. A leftover is a `.tmp.*`
+        // sibling that sweepStaleStaging reclaims later.
+        let archiveURL = cacheRoot.appendingPathComponent(".tmp.\(info.version).\(UUID().uuidString).zip")
+        defer { try? fileManager.removeItem(at: archiveURL) }
         try await download(from: info.resolvedURL, to: archiveURL)
         Diagnostics.remark("BrowserStackAccessibilityLint: Extracting CLI \(info.version)...")
-        try unzip(archive: archiveURL, into: versionDirectory)
-        try? fileManager.removeItem(at: archiveURL)
+        try unzip(archive: archiveURL, into: stagingDirectory)
         #else
-        try extractWithBsdtar(from: info.resolvedURL, into: versionDirectory)
+        try extractWithBsdtar(from: info.resolvedURL, into: stagingDirectory)
         #endif
 
-        // Platform-agnostic backstop (DEVA11Y-484). The bsdtar paths already abort mid-stream
-        // via the watchdog; this also covers the Windows Expand-Archive path, which has no
-        // streaming guard — it can't bound peak disk during extraction, but it rejects and
-        // cleans up a bomb before the binary is ever used.
-        if let reason = footprintExceeded(at: versionDirectory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries) {
-            try? fileManager.removeItem(at: versionDirectory)
+        // Platform-agnostic backstop (DEVA11Y-484). Both bsdtar paths already abort
+        // mid-stream via the watchdog; this also covers the Windows Expand-Archive path,
+        // which has no streaming guard — it cannot bound peak disk during extraction, but it
+        // rejects and cleans up a bomb before the binary is ever used.
+        //
+        // Checked against the staging directory and *before* publishVersionDirectory
+        // (DEVA11Y-482), so a rejected archive never becomes a visible version directory.
+        if let reason = footprintExceeded(at: stagingDirectory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries) {
+            try? fileManager.removeItem(at: stagingDirectory)
             forwardExit(code: 1, message: "BrowserStack CLI archive rejected: \(reason). Aborting to prevent disk exhaustion.")
         }
 
-        let locatedBinary = try locateExecutable(in: versionDirectory, preferredName: executableName)
-        let finalBinaryURL: URL
-        if locatedBinary.lastPathComponent == executableName {
-            finalBinaryURL = locatedBinary
-        } else {
-            finalBinaryURL = expectedExecutableURL
-            if fileManager.fileExists(atPath: finalBinaryURL.path) {
-                try fileManager.removeItem(at: finalBinaryURL)
+        // Normalise the binary to the expected name *inside* the staging directory so the
+        // published version directory is always structurally complete before it is renamed.
+        // Compare full paths, not just the last component: locateExecutable recurses, so a
+        // binary that already has the right name can still sit in a nested subdirectory
+        // (e.g. a versioned tarball folder). Relocating it to the top-level staged path
+        // unless it is already exactly there guarantees stagedExecutableURL exists before
+        // we set permissions and publish.
+        let locatedBinary = try locateExecutable(in: stagingDirectory, preferredName: executableName)
+        let stagedExecutableURL = stagingDirectory.appendingPathComponent(executableName, isDirectory: false)
+        if locatedBinary.standardizedFileURL != stagedExecutableURL.standardizedFileURL {
+            if fileManager.fileExists(atPath: stagedExecutableURL.path) {
+                try fileManager.removeItem(at: stagedExecutableURL)
             }
-            try fileManager.moveItem(at: locatedBinary, to: finalBinaryURL)
+            try fileManager.moveItem(at: locatedBinary, to: stagedExecutableURL)
+        }
+        try ensureExecutablePermissions(at: stagedExecutableURL)
+
+        try publishVersionDirectory(from: stagingDirectory, to: versionDirectory, expectedExecutableURL: expectedExecutableURL)
+        return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
+    }
+
+    /// Publishes a fully-prepared staging directory to its final version directory.
+    ///
+    /// Correctness does not depend on `moveItem`'s throw-on-existing-destination behaviour,
+    /// which differs across Foundation platforms (Darwin throws `fileWriteFileExists`; a
+    /// bare POSIX `rename(2)` silently replaces an empty destination). We check for the
+    /// destination explicitly: when it is absent the publish is a single atomic rename on
+    /// the shared cache filesystem (staging and version dir are both children of cacheRoot),
+    /// so concurrent builds never observe a half-formed version directory; when it is
+    /// present — another build won the race, or `forceDownload` is refreshing a stale copy —
+    /// a valid published binary is reused, otherwise the stale directory is replaced and the
+    /// rename retried once. The replace path is deliberate last-writer-wins and is *not*
+    /// atomic; it tolerates a peer removing or republishing the directory concurrently
+    /// rather than failing the build.
+    private func publishVersionDirectory(from stagingDirectory: URL, to versionDirectory: URL, expectedExecutableURL: URL) throws {
+        // Fast path: destination absent -> single atomic rename. A create race that briefly
+        // loses (destination appears between the check and the move) falls through to the
+        // shared "destination present" handling below rather than failing.
+        if !fileManager.fileExists(atPath: versionDirectory.path) {
+            do {
+                try fileManager.moveItem(at: stagingDirectory, to: versionDirectory)
+                return
+            } catch {
+                // Fall through.
+            }
         }
 
-        try ensureExecutablePermissions(at: finalBinaryURL)
-        return BrowserStackCLIArtifact(version: info.version, executableURL: finalBinaryURL)
+        // Destination present: reuse a valid binary unless a forced refresh was requested.
+        if !forceDownload, fileManager.isExecutableFile(atPath: expectedExecutableURL.path) {
+            return
+        }
+
+        // Stale/incomplete destination, or a forced refresh: replace and retry once.
+        // removeItem is best-effort so a peer deleting the directory first cannot turn into
+        // an ENOENT crash mid-race.
+        try? fileManager.removeItem(at: versionDirectory)
+        do {
+            try fileManager.moveItem(at: stagingDirectory, to: versionDirectory)
+        } catch {
+            // A peer republished the version directory between our remove and move. If it
+            // now holds a valid binary, treat that as success rather than failing a build
+            // that already has the artifact it needs.
+            if fileManager.isExecutableFile(atPath: expectedExecutableURL.path) {
+                return
+            }
+            throw error
+        }
     }
 
 #if !os(Windows)
@@ -609,8 +705,13 @@ private func hardwareIdentifier() throws -> String {
 private func extractVersion(from url: URL) -> String? {
     let filename = url.deletingPathExtension().lastPathComponent
     if let range = filename.range(of: "-", options: .backwards) {
-        let version = filename[range.upperBound...]
-        return version.isEmpty ? nil : String(version)
+        let version = String(filename[range.upperBound...])
+        if version.isEmpty { return nil }
+        // Reject path traversal and non-semver characters
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-+"))
+        guard version.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
+        guard !version.contains("..") else { return nil }
+        return version
     }
     return nil
 }
@@ -625,6 +726,24 @@ private func isAlpineLinux() -> Bool {
 #else
 private func isAlpineLinux() -> Bool { false }
 #endif
+
+// MARK: - RBAC capability gating (ADR-0025)
+
+// The headless CLI performs all WebSocket work — authentication, the
+// connect/profile/handshake exchange (where the server ships the
+// `capabilities` set + `effectiveRole`), and capability-gating of
+// lint/scan/set-config. This SPM plugin is a thin wrapper that downloads
+// and invokes that CLI as a subprocess, so it has no WebSocket message-
+// decoding path and no Codable response model of its own to gate on:
+// capability decisions are read by the CLI from the server's capability set,
+// never re-encoded here. The one RBAC signal the wrapper sees is the CLI's
+// exit code. `browserstack-cli` exits `PERMISSION_DENIED` (4) on a denied
+// action (mirrors ExitCodes.PERMISSION_DENIED in the headless CLI; 3 is
+// FUP_EXHAUSTED) and has already written the role-aware "Permission denied: …"
+// detail to stderr. Pre-RBAC CLIs (rollout gated by
+// LINTER_RBAC_ENFORCEMENT_ENABLED on the server) never emit this code, so the
+// default path is unchanged.
+private let browserstackCLIPermissionDeniedExitCode: Int32 = 4
 
 // MARK: - CLI invocation
 
@@ -645,6 +764,17 @@ private func isAlpineLinux() -> Bool { false }
         }
 
         let status = process.terminationStatus
+        if status == browserstackCLIPermissionDeniedExitCode {
+            // Surface the RBAC denial as a clear, role-aware outcome rather than
+            // a generic failure. The CLI has already printed the specific
+            // "Permission denied: …" reason to stderr; preserve its exit code so
+            // CI and the SPM build phase can distinguish a denial from a lint
+            // failure (exit 1) or a tooling error (exit 2).
+            forwardExit(
+                code: status,
+                message: "BrowserStack Accessibility: your account's role is not permitted to run this action. See the \"Permission denied\" detail above, or contact your workspace admin to request access."
+            )
+        }
         guard status == 0 else {
             forwardExit(code: status, message: "")
         }

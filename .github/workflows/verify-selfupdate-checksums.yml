@@ -1,0 +1,74 @@
+name: Verify self-update checksums
+
+# Self-update fetches each launcher script from `main` and verifies it against a
+# committed `<script>.sha256` sidecar. If a script is edited without regenerating
+# its sidecar, self-update silently breaks for every user (checksum mismatch →
+# update refused). This workflow fails the PR/push when a sidecar is missing or
+# out of sync, keeping the two in lockstep. (DEVA11Y-475 review follow-up.)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/verify-selfupdate-checksums.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/verify-selfupdate-checksums.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-sidecars:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Verify scripts and .sha256 sidecars are in sync
+        run: |
+          set -uo pipefail
+          shopt -s globstar nullglob
+          status=0
+
+          # 1. Every self-updating script must have a sidecar.
+          script_files=(scripts/**/*.sh)
+          if [ ${#script_files[@]} -eq 0 ]; then
+            echo "::error::No .sh scripts found under scripts/ — checkout or glob is wrong."
+            exit 1
+          fi
+          for script in "${script_files[@]}"; do
+            if [ ! -f "${script}.sha256" ]; then
+              echo "::error file=${script}::Missing checksum sidecar ${script}.sha256. Generate it from the script's directory: shasum -a 256 <name>.sh | awk '{print \$1\"  <name>.sh\"}' > <name>.sh.sha256"
+              status=1
+            fi
+          done
+
+          # 2. Every sidecar must match its script.
+          sidecars=(scripts/**/*.sha256)
+          if [ ${#sidecars[@]} -eq 0 ]; then
+            echo "::error::No .sha256 sidecars found under scripts/."
+            exit 1
+          fi
+          for sidecar in "${sidecars[@]}"; do
+            dir=$(dirname "$sidecar")
+            script="${sidecar%.sha256}"
+            if [ ! -f "$script" ]; then
+              echo "::error file=${sidecar}::Sidecar references missing script ${script}."
+              status=1
+              continue
+            fi
+            # Sidecars store "<sha256>  <basename>", so verify from the script's dir.
+            if ( cd "$dir" && sha256sum -c "$(basename "$sidecar")" > /dev/null ); then
+              echo "::notice file=${script}::Checksum OK"
+            else
+              echo "::error file=${script}::Checksum mismatch — regenerate ${sidecar} after editing ${script} (run from ${dir}): shasum -a 256 <name>.sh | awk '{print \$1\"  <name>.sh\"}' > <name>.sh.sha256"
+              status=1
+            fi
+          done
+
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Self-update checksum verification failed. Regenerate the affected .sha256 sidecar(s) and commit them."
+          fi
+          exit "$status"
