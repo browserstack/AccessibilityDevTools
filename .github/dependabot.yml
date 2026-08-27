@@ -13,6 +13,11 @@ updates:
     directory: "/.github/workflows"
     schedule:
       interval: "weekly"
+    # Wait for a digest to age before adopting it. A brand-new image build could be
+    # a poisoned upstream tag; a cooldown gives time for detection/revocation before
+    # Dependabot bumps the pin, without holding back genuine security patches for long.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "chore(deps)"
     labels:
