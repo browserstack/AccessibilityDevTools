@@ -9,6 +9,7 @@ on the repo root (`../..`), so it always exercises the local plugin sources.
 |---|---|---|
 | [`spm/`](./spm) | SwiftPM package | Package dependency on `AccessibilityDevTools`; the command plugin is invoked with `swift package plugin … scan`. |
 | [`xcode-app/`](./xcode-app) | Xcode iOS app (XcodeGen) | A pre-compile build phase runs the scan on every build — the official Xcode integration. |
+| [`extraction-guard/`](./extraction-guard) | Security regression suite — not a consumer project | Drives the launcher scripts' `download_binary` and a mirror of the plugin's extraction guard against crafted archives (decompression bombs, entry-count bombs, oversized downloads). See DEVA11Y-484. |
 
 ## Why two harnesses
 

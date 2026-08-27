@@ -2,8 +2,8 @@ import Foundation
 
 // === DEVA11Y-484 EXTRACTION GUARD: shared block ===
 // This block is mirrored verbatim in
-//   scripts/test/swift-harness/Sources/ExtractionHarness/Guard.swift
-// so the integration harness exercises the real logic. scripts/test/check_drift.sh
+//   tests/extraction-guard/swift-harness/Sources/ExtractionHarness/Guard.swift
+// so the integration harness exercises the real logic. tests/extraction-guard/check_drift.sh
 // fails CI if the two copies diverge. Edit both, or neither.
 //
 // Rationale: bsdtar writes decompressed bytes straight to disk, so a cap on the

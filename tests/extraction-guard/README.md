@@ -7,7 +7,7 @@ Real, local integration tests for the size/entry guards added to the CLI downloa
 ## Run everything
 
 ```bash
-scripts/test/run_tests.sh
+tests/extraction-guard/run_tests.sh
 ```
 
 This generates fixtures (first run only), checks guard sync, then runs the shell and

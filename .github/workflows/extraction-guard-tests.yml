@@ -12,7 +12,7 @@ on:
       - "scripts/bash/cli.sh"
       - "scripts/zsh/cli.sh"
       - "scripts/fish/cli.sh"
-      - "scripts/test/**"
+      - "tests/extraction-guard/**"
       - ".github/workflows/extraction-guard-tests.yml"
   push:
     branches: ["master", "main"]
@@ -33,4 +33,4 @@ jobs:
           curl --version | head -1
           python3 --version
       - name: Run DEVA11Y-484 extraction-guard regression suite
-        run: bash scripts/test/run_tests.sh
+        run: bash tests/extraction-guard/run_tests.sh
