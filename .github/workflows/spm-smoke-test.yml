@@ -122,3 +122,96 @@ jobs:
             fi
           done
           exit "$status"
+
+  # Functionally exercises verify_binary_integrity (DEVA11Y-473/474) across its full
+  # fail-open / fail-closed matrix against a local python fixture server. Because the
+  # control fails OPEN today (no sidecars published yet), a `bash -n` gate alone would
+  # give ZERO red signal if this function were broken — the regression would only surface
+  # the day the sidecars go live. This job is the guard against that. No secrets needed.
+  verify-integrity-fn:
+    name: CLI binary integrity check (functional matrix)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Exercise verify_binary_integrity (fail-open / fail-closed matrix)
+        run: |
+          set -uo pipefail
+          SRC=scripts/bash/cli.sh
+          # Lift the two functions verbatim off the branch (name() { ... } to first bare }).
+          extract() { awk -v fn="$1" 'index($0,fn"() {")==1{p=1} p{print} p&&/^}$/{exit}' "$SRC"; }
+          eval "$(extract _self_update_sha256)"
+          eval "$(extract verify_binary_integrity)"
+          WORK=$(mktemp -d); cd "$WORK"
+          printf 'REAL-BINARY-PAYLOAD' > good.zip
+          GOOD=$(_self_update_sha256 good.zip)
+          mkdir srv
+          ( cd srv && python3 -m http.server 8799 >/dev/null 2>&1 & echo $! > "$WORK/pid" )
+          sleep 1
+          BASE="http://127.0.0.1:8799/asset.zip"
+          pass=0; fail=0
+          # NOTE: GitHub's default `shell: bash -e {0}` injects -e, which `set -uo
+          # pipefail` does not undo. verify_binary_integrity intentionally returns
+          # non-zero on the fail-closed cases, so capture rc with `&& rc=0 || rc=$?`
+          # rather than `; rc=$?` — the latter aborts the whole step under -e before
+          # the `[ "$fail" -eq 0 ]` gate at the end ever runs.
+          check() { local d="$1" erc="$2" ez="$3" url="$4" out rc z
+            cp good.zip z.zip
+            out=$(verify_binary_integrity z.zip "$url" 2>&1) && rc=0 || rc=$?
+            z=gone; [ -f z.zip ] && z=kept
+            if [ "$rc" = "$erc" ] && [ "$z" = "$ez" ]; then echo "PASS | $d | rc=$rc zip=$z"; pass=$((pass+1))
+            else echo "FAIL | $d | got rc=$rc zip=$z want rc=$erc zip=$ez | $out"; fail=$((fail+1)); fi
+          }
+          check "empty resolved URL (skip)"        0 kept ""
+          printf '%s  asset.zip\n' "$GOOD" > srv/asset.zip.sha256
+          check "good sidecar"                     0 kept "$BASE"
+          check "good + ?token= query"             0 kept "${BASE}?token=abc"
+          rm -f srv/asset.zip.sha256
+          check "missing sidecar (404)"            0 kept "$BASE"
+          printf '%s  asset.zip\n' "$(echo "$GOOD" | tr 'a-z' 'A-Z')" > srv/asset.zip.sha256
+          check "uppercase published hash"         0 kept "$BASE"
+          printf '%s  asset.zip\n' "0000000000000000000000000000000000000000000000000000000000000000" > srv/asset.zip.sha256
+          check "wrong checksum"                   2 gone "$BASE"
+          : > srv/asset.zip.sha256
+          check "empty sidecar (200)"              2 gone "$BASE"
+          printf '<Error><Code>AccessDenied</Code></Error>' > srv/asset.zip.sha256
+          check "malformed 200 (error page)"       0 kept "$BASE"
+          kill "$(cat "$WORK/pid")" 2>/dev/null || true
+          echo "----"; echo "PASS=$pass FAIL=$fail"
+          [ "$fail" -eq 0 ]
+
+  # Positive assertion that the SERVER half (DEVA11Y-473/474) has shipped: resolves the
+  # real (unauthenticated) download redirect to the versioned asset and probes the
+  # <asset>.sha256 sidecar the client verifies against. Advisory (::warning) today because
+  # the sidecars are not published yet and verification is inert by design; flip the marked
+  # line to a hard failure once SDK-assets publishes them so this proves verification runs.
+  sidecar-availability:
+    name: CLI checksum sidecar published (advisory until server half ships)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assert <asset>.sha256 resolves to a 64-hex digest
+        run: |
+          set -uo pipefail
+          resolved=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+            "https://api.browserstack.com/sdk/v1/download_cli?os=macos&os_arch=arm64" || true)
+          if [ -z "$resolved" ]; then
+            echo "::warning::Could not resolve the CLI asset URL; skipping sidecar availability check."
+            exit 0
+          fi
+          sum_url="${resolved%%\?*}.sha256"
+          code=$(curl -fsSL -o body.txt -w '%{http_code}' "$sum_url" || echo 000)
+          # `|| true`: on the expected 403 (server half not shipped) curl writes no
+          # body.txt, so awk exits non-zero and pipefail propagates it — which under
+          # the GHA-injected `bash -e` would abort the step and turn this advisory
+          # ::warning into a red check. Keep it advisory until the sidecars ship.
+          first=$(awk '{print $1; exit}' body.txt 2>/dev/null | tr 'A-Z' 'a-z' || true)
+          if [ "$code" = "200" ] && printf '%s' "$first" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "Sidecar published and well-formed at ${sum_url}"
+          else
+            # TODO(DEVA11Y-473/474 server half): change the next block to `exit 1` once
+            # SDK-assets publishes <asset>.sha256 (public-read). Until then verification
+            # is inert, so this stays advisory rather than red-blocking every PR.
+            echo "::warning::No well-formed checksum sidecar at ${sum_url} yet (HTTP ${code}); CLI binary integrity verification is INERT until the server half ships. Flip this check to a hard failure once sidecars are published."
+          fi

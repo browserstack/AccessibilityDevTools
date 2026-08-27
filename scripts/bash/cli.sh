@@ -190,31 +190,92 @@ strip_quarantine() {
   fi
 }
 
+# DEVA11Y-473/474: verify the downloaded CLI archive against a server-published
+# SHA-256 sidecar before extracting and executing it. api.browserstack.com (the
+# control plane) 302-redirects to a versioned, immutable asset on the CDN/S3 (the
+# data plane); a checksum published next to that asset lets us detect a tampered
+# or corrupted binary before `chmod 0755` + exec. Semantics mirror self-update:
+# fail CLOSED on a checksum mismatch, fail OPEN (warn + proceed) when no sidecar
+# is published yet, so this stays non-breaking until the SDK-assets team ships the
+# sidecars (the server-side half of DEVA11Y-473/474).
+verify_binary_integrity() {
+  local zip_path="$1" resolved_url="$2" sum_url tmp_sum expected actual
+  if [[ -z "$resolved_url" ]]; then
+    echo "CLI download: could not resolve asset URL; skipping integrity check (DEVA11Y-473/474)." >&2
+    return 0
+  fi
+  # Derive the sidecar from the asset path only. Stripping any query string keeps
+  # signed/presigned URLs (…zip?token=) from deriving a permanently-404 sidecar
+  # (…zip?token=.sha256), which would silently disable verification.
+  sum_url="${resolved_url%%\?*}.sha256"
+  tmp_sum=$(mktemp "${TMPDIR:-/tmp}/bs-a11y-clisum.XXXXXX") || return 0
+  # shellcheck disable=SC2064
+  trap "rm -f -- '${tmp_sum}'" RETURN
+  if ! curl -fsSL --connect-timeout 10 --max-time 30 "$sum_url" -o "$tmp_sum" 2>/dev/null; then
+    echo "CLI download: no published checksum at ${sum_url}; proceeding WITHOUT integrity verification (DEVA11Y-473/474)." >&2
+    return 0
+  fi
+  expected=$(awk '{print $1; exit}' "$tmp_sum" | tr 'A-Z' 'a-z')
+  actual=$(_self_update_sha256 "$zip_path" | tr 'A-Z' 'a-z')
+  # A present-but-empty sidecar body is a hard failure: once the server publishes
+  # checksums, a blank value must not silently downgrade to "no verification".
+  if [[ -z "$expected" ]]; then
+    echo "CLI download: empty checksum at ${sum_url}; refusing to use the downloaded binary." >&2
+    rm -f -- "$zip_path"
+    return 2
+  fi
+  # A non-empty body that is NOT a 64-char hex digest is a CDN/S3 error page answered 200
+  # (e.g. an S3 `AccessDenied` XML), not a checksum. Its first token must not become the
+  # "expected hash" and hard-fail every client on every run; fail OPEN instead (DEVA11Y-473/474 review).
+  if ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "CLI download: malformed checksum at ${sum_url}; proceeding WITHOUT verification (DEVA11Y-473/474)." >&2
+    return 0
+  fi
+  if [[ -z "$actual" || "$expected" != "$actual" ]]; then
+    echo "CLI download: checksum mismatch; refusing to use the downloaded binary." >&2
+    echo "  expected: ${expected}" >&2
+    echo "  actual:   ${actual:-<empty>}" >&2
+    rm -f -- "$zip_path"
+    return 2
+  fi
+}
+
 download_binary() {
   local max_decompressed=209715200 # 200 MB cap on the decompressed binary
 
-  curl -R -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH"
+  local resolved_url
+  resolved_url=$(curl -fR -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || {
+    echo "CLI download failed." >&2
+    return 1
+  }
+  verify_binary_integrity "$BINARY_ZIP_PATH" "$resolved_url" || return $?
 
-  # Guard against a decompression bomb (DEVA11Y-484): head -c stops bsdtar (via SIGPIPE)
-  # once the decompressed output reaches the cap; pipefail surfaces that as a failure.
+  # Extract to a temp path and atomically publish it. `> "$BINARY_PATH"` truncates the
+  # destination before bsdtar is known to have succeeded, so a corrupt payload — the live
+  # case today, since no sidecars are published yet and verification fails open — would
+  # zero out a previously-good cached binary. Stage + mv keeps the cached binary intact
+  # unless a fresh, extractable payload is in hand (DEVA11Y-473/474 review).
+  #
+  # The decompression-bomb guard (DEVA11Y-484) sits on that same staged path: head -c stops
+  # bsdtar via SIGPIPE once the decompressed output reaches the cap, and pipefail surfaces
+  # that as a failure. Because the cap applies to ${BINARY_PATH}.tmp and publication is a
+  # later mv, a rejected bomb leaves any previously-cached binary untouched.
   set -o pipefail
-  bsdtar -xvf "$BINARY_ZIP_PATH" -O | head -c "$max_decompressed" > "$BINARY_PATH"
+  bsdtar -xvf "$BINARY_ZIP_PATH" -O | head -c "$max_decompressed" > "${BINARY_PATH}.tmp"
   local extract_status=$?
   set +o pipefail
 
   local extracted_size
-  extracted_size=$(wc -c < "$BINARY_PATH" 2>/dev/null || echo 0)
+  extracted_size=$(wc -c < "${BINARY_PATH}.tmp" 2>/dev/null || echo 0)
   if [[ $extract_status -ne 0 || $extracted_size -ge $max_decompressed ]]; then
     echo "BrowserStack CLI download failed or exceeds the maximum allowed size (200 MB). Aborting." >&2
-    rm -f "$BINARY_PATH"
-    exit 1
+    rm -f "${BINARY_PATH}.tmp"
+    return 1
   fi
 
-  # chmod 0755 (not 0775) and strip_quarantine both come from main (DEVA11Y-752): the
-  # size guard above exits non-zero on failure, so reaching here means extraction
-  # succeeded and the chained && from main is not needed.
-  chmod 0755 "$BINARY_PATH"
-  strip_quarantine
+  chmod 0755 "${BINARY_PATH}.tmp" \
+    && mv -f "${BINARY_PATH}.tmp" "$BINARY_PATH" \
+    && strip_quarantine
 }
 
 # Self-update is opt-in (DEVA11Y-475): it runs only via the explicit `self-update`
@@ -237,5 +298,7 @@ if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   exit 0
 fi
 
-download_binary
+# Abort before executing the CLI if the download or its integrity check failed
+# (checksum mismatch returns 2 from download_binary -> DEVA11Y-473/474).
+download_binary || exit $?
 a11y_scan
