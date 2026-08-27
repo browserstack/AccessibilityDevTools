@@ -1,26 +1,30 @@
 # Dependabot configuration.
 #
-# Keeps the digest-pinned Semgrep CI container image current (DEVA11Y-476 / chain
-# DEVA11Y-485). The image in .github/workflows/Semgrep.yml is pinned to an immutable
-# @sha256 digest for supply-chain integrity; a static digest never receives upstream
-# security patches, so Dependabot's `docker` ecosystem watches the image reference in
-# the workflow's job-level `container:` and opens PRs that bump the pin to the newest
-# digest as returntocorp/semgrep is rebuilt.
+# Rotates the pinned GitHub Actions used across .github/workflows (DEVA11Y-476 /
+# chain DEVA11Y-485). Action `uses:` pins are pinned to immutable commit SHAs for
+# supply-chain integrity; a static SHA never receives upstream security patches, so
+# Dependabot's `github-actions` ecosystem opens PRs that bump each pin as new
+# releases ship.
+#
+# NOTE: Dependabot cannot rotate the `container:` image digest in Semgrep.yml — its
+# `docker` ecosystem only discovers Dockerfiles/Containerfiles, Kubernetes manifests,
+# Helm values and Compose files, not image refs in workflow files
+# (dependabot-core#5819). That digest is watched by .github/workflows/semgrep-image-pin-drift.yml
+# instead, which alarms on drift so a human bumps it deliberately.
 version: 2
 updates:
-  # Docker image references in GitHub Actions workflow files (job `container:` / `services:`).
-  - package-ecosystem: "docker"
-    directory: "/.github/workflows"
+  # GitHub Actions `uses:` pins in .github/workflows (directory "/" — the ecosystem
+  # searches the workflows dir itself).
+  - package-ecosystem: "github-actions"
+    directory: "/"
     schedule:
       interval: "weekly"
-    # Wait for a digest to age before adopting it. A brand-new image build could be
-    # a poisoned upstream tag; a cooldown gives time for detection/revocation before
-    # Dependabot bumps the pin, without holding back genuine security patches for long.
+    # Wait for a release to age before adopting it: a brand-new tag could be a
+    # poisoned upstream release; a cooldown gives time for detection/revocation
+    # before Dependabot bumps the pin, without holding back genuine patches for long.
     cooldown:
       default-days: 7
     commit-message:
       prefix: "chore(deps)"
     labels:
       - "dependencies"
-      - "security"
-    open-pull-requests-limit: 5

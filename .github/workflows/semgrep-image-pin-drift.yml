@@ -1,0 +1,49 @@
+# Alarms when the pinned Semgrep CI container image digest in Semgrep.yml drifts
+# from returntocorp/semgrep:latest (DEVA11Y-476 / chain DEVA11Y-485).
+#
+# Dependabot cannot rotate a `container:` image digest in a workflow file
+# (dependabot-core#5819), so instead of auto-adopting whatever `latest` resolves to
+# — undesirable for the C-001 threat model, where a poisoned upstream tag is the
+# risk — this job keeps a human in the loop: it fails on drift so someone bumps the
+# pin deliberately after reviewing the new digest. Read-only; no write permissions.
+name: Semgrep image pin drift
+on:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  drift:
+    name: Pinned digest vs returntocorp/semgrep:latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Compare pinned digest against returntocorp/semgrep:latest
+        run: |
+          set -uo pipefail
+          pinned=$(grep -oE 'returntocorp/semgrep@sha256:[0-9a-f]{64}' \
+            .github/workflows/Semgrep.yml | head -n1 | cut -d@ -f2)
+          if [ -z "$pinned" ]; then
+            echo "::error::Could not find a returntocorp/semgrep@sha256 pin in .github/workflows/Semgrep.yml"
+            exit 1
+          fi
+          token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:returntocorp/semgrep:pull" | jq -r .token)
+          latest=$(curl -fsSI -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://registry-1.docker.io/v2/returntocorp/semgrep/manifests/latest" \
+            | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}')
+          if [ -z "$latest" ]; then
+            echo "::error::Could not resolve returntocorp/semgrep:latest digest from the registry"
+            exit 1
+          fi
+          echo "pinned: $pinned"
+          echo "latest: $latest"
+          if [ "$pinned" = "$latest" ]; then
+            echo "Semgrep image pin is current."
+          else
+            echo "::error::Semgrep image pin drifted ($pinned != $latest) — review and bump the digest in .github/workflows/Semgrep.yml"
+            exit 1
+          fi
