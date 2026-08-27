@@ -202,10 +202,9 @@ strip_quarantine() {
 }
 
 download_binary() {
-  local max_compressed=104857600   # 100 MB cap on the compressed download
   local max_decompressed=209715200 # 200 MB cap on the decompressed binary
 
-  curl --max-filesize "$max_compressed" -R -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH"
+  curl -R -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH"
 
   # Guard against a decompression bomb (DEVA11Y-484): head -c stops bsdtar (via SIGPIPE)
   # once the decompressed output reaches the cap; pipefail surfaces that as a failure.

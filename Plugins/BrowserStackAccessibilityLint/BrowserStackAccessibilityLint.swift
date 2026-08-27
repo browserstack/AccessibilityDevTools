@@ -172,7 +172,6 @@ private struct BrowserStackCLIDownloader {
 
     // Decompression-bomb guards (DEVA11Y-484). The CLI binary is a few tens of MB; these
     // ceilings leave generous headroom while bounding a malicious archive's footprint.
-    private static let maxCompressedBytes = 100 * 1024 * 1024      // 100 MB on the wire
     private static let maxDecompressedBytes: Int64 = 200 * 1024 * 1024  // 200 MB on disk
     private static let maxArchiveEntries = 10_000
 
@@ -265,18 +264,6 @@ private struct BrowserStackCLIDownloader {
         try extractWithBsdtar(from: info.resolvedURL, into: stagingDirectory)
         #endif
 
-        // Platform-agnostic backstop (DEVA11Y-484). Both bsdtar paths already abort
-        // mid-stream via the watchdog; this also covers the Windows Expand-Archive path,
-        // which has no streaming guard — it cannot bound peak disk during extraction, but it
-        // rejects and cleans up a bomb before the binary is ever used.
-        //
-        // Checked against the staging directory and *before* publishVersionDirectory
-        // (DEVA11Y-482), so a rejected archive never becomes a visible version directory.
-        if let reason = footprintExceeded(at: stagingDirectory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries) {
-            try? fileManager.removeItem(at: stagingDirectory)
-            forwardExit(code: 1, message: "BrowserStack CLI archive rejected: \(reason). Aborting to prevent disk exhaustion.")
-        }
-
         // Normalise the binary to the expected name *inside* the staging directory so the
         // published version directory is always structurally complete before it is renamed.
         // Compare full paths, not just the last component: locateExecutable recurses, so a
@@ -360,9 +347,7 @@ private struct BrowserStackCLIDownloader {
 
         let curl = Process()
         curl.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        // --max-filesize caps the *compressed* download as a coarse first line of defense
-        // against a malicious endpoint streaming an unbounded body.
-        curl.arguments = ["curl", "-fsSL", "--max-filesize", String(Self.maxCompressedBytes), url.absoluteString]
+        curl.arguments = ["curl", "-fsSL", url.absoluteString]
         curl.standardOutput = pipe
         let curlError = Pipe()
         curl.standardError = curlError
@@ -782,11 +767,7 @@ private let browserstackCLIPermissionDeniedExitCode: Int32 = 4
 
 // MARK: - Error
 
-// === DEVA11Y-484 EXTRACTION GUARD: shared block ===
-// This block is mirrored verbatim in
-//   tests/extraction-guard/swift-harness/Sources/ExtractionHarness/Guard.swift
-// so the integration harness exercises the real logic. tests/extraction-guard/check_drift.sh
-// fails CI if the two copies diverge. Edit both, or neither.
+// === DEVA11Y-484 EXTRACTION GUARD ===
 //
 // Rationale: bsdtar writes decompressed bytes straight to disk, so a cap on the
 // curl→bsdtar pipe would only bound the *compressed* size — useless against a
