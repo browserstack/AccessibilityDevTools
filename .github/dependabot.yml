@@ -10,7 +10,7 @@
 # `docker` ecosystem only discovers Dockerfiles/Containerfiles, Kubernetes manifests,
 # Helm values and Compose files, not image refs in workflow files
 # (dependabot-core#5819). That digest is watched by .github/workflows/semgrep-image-pin-drift.yml
-# instead, which alarms on drift so a human bumps it deliberately.
+# instead, which alarms when the pinned image goes stale so a human bumps it deliberately.
 version: 2
 updates:
   # GitHub Actions `uses:` pins in .github/workflows (directory "/" — the ecosystem
@@ -19,9 +19,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    # Wait for a release to age before adopting it: a brand-new tag could be a
-    # poisoned upstream release; a cooldown gives time for detection/revocation
-    # before Dependabot bumps the pin, without holding back genuine patches for long.
+    # INERT for the github-actions ecosystem: `cooldown` is NOT among the ecosystems
+    # GitHub supports it for (docker/bundler/npm/pip/… do; github-actions does not),
+    # so this key does nothing here. It is kept ONLY to satisfy Semgrep's
+    # `dependabot-missing-cooldown` rule (a schema-level check that does not know the
+    # key is ecosystem-inert). It provides no actual release-age protection for action
+    # bumps — that would require Renovate's `minimumReleaseAge`. Do not treat actions
+    # bumped by this config as having aged past a cooldown window.
     cooldown:
       default-days: 7
     commit-message:
