@@ -43,7 +43,7 @@ jobs:
       RUN_A11Y_SCAN: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Swift toolchain
         run: swift --version
@@ -91,7 +91,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Every script under scripts/ — the bash, zsh and fish variants alike — is
       # a bash script (`#!/usr/bin/env bash -il`); the variants differ only in which
@@ -134,7 +134,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Exercise verify_binary_integrity (fail-open / fail-closed matrix)
         run: |
           set -uo pipefail
