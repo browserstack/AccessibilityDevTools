@@ -1,0 +1,34 @@
+# Dependabot configuration.
+#
+# Rotates the pinned GitHub Actions used across .github/workflows (DEVA11Y-476 /
+# chain DEVA11Y-485). Action `uses:` pins are pinned to immutable commit SHAs for
+# supply-chain integrity; a static SHA never receives upstream security patches, so
+# Dependabot's `github-actions` ecosystem opens PRs that bump each pin as new
+# releases ship.
+#
+# NOTE: Dependabot cannot rotate the `container:` image digest in Semgrep.yml — its
+# `docker` ecosystem only discovers Dockerfiles/Containerfiles, Kubernetes manifests,
+# Helm values and Compose files, not image refs in workflow files
+# (dependabot-core#5819). That digest is watched by .github/workflows/semgrep-image-pin-drift.yml
+# instead, which alarms when the pinned image goes stale so a human bumps it deliberately.
+version: 2
+updates:
+  # GitHub Actions `uses:` pins in .github/workflows (directory "/" — the ecosystem
+  # searches the workflows dir itself).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # INERT for the github-actions ecosystem: `cooldown` is NOT among the ecosystems
+    # GitHub supports it for (docker/bundler/npm/pip/… do; github-actions does not),
+    # so this key does nothing here. It is kept ONLY to satisfy Semgrep's
+    # `dependabot-missing-cooldown` rule (a schema-level check that does not know the
+    # key is ecosystem-inert). It provides no actual release-age protection for action
+    # bumps — that would require Renovate's `minimumReleaseAge`. Do not treat actions
+    # bumped by this config as having aged past a cooldown window.
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
