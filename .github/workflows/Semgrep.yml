@@ -28,10 +28,8 @@ jobs:
     container:
       # Pinned by digest for supply-chain integrity (DEVA11Y-476).
       # To update: docker manifest inspect returntocorp/semgrep:latest
-      image: returntocorp/semgrep@sha256:f682953ce85e3725f4a4dd94bd7ad13e570bb6b2c7a8cf7c6e38a9eac89239b2
+      image: returntocorp/semgrep@sha256:f1f7b71861c7b28b6e0f661225a2c4f58a484f5d0f182465c6d6b3b22f972ade
 
-    # Skip any PR created by dependabot to avoid permission issues:
-    if: (github.actor != 'dependabot[bot]')
 
     steps:
       # Fetch project source with GitHub Actions Checkout.
@@ -46,5 +44,10 @@ jobs:
         uses: github/codeql-action/upload-sarif@6c089f53dd51dc3fc7e599c3cb5356453a52ca9e # v2.20.0
         with:
           sarif_file: semgrep.sarif
-        if: always()
+        # SARIF upload needs security-events: write, which Dependabot-triggered runs
+        # do not get; skip only this privileged step for dependabot so the scan itself
+        # still runs on Dependabot PRs (which bump the action pins that live in this
+        # very workflow). always() keeps upload on non-dependabot runs even if the scan
+        # step reports findings.
+        if: always() && github.actor != 'dependabot[bot]'
 

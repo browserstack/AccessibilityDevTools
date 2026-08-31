@@ -1,0 +1,115 @@
+# Alarms when the pinned Semgrep CI container image digest in Semgrep.yml goes STALE
+# (DEVA11Y-476 / chain DEVA11Y-485).
+#
+# Dependabot cannot rotate a `container:` image digest in a workflow file
+# (dependabot-core#5819), so instead of auto-adopting whatever `latest` resolves to
+# — undesirable for the C-001 threat model, where a freshly-poisoned upstream tag is
+# the risk — this job keeps a human in the loop. It does NOT fail merely because
+# `latest` has moved (returntocorp/semgrep is rebuilt ~weekly, so a "differs from
+# latest" alarm would be red most weeks and get muted). Instead it fails only when
+# the *pinned* image is older than MAX_AGE_DAYS, which is actionable ("your pin is N
+# days stale") rather than noise ("upstream pushed yesterday"). Read-only; no write
+# permissions.
+#
+# OPS CAVEAT: GitHub disables scheduled workflows after 60 days of repository
+# inactivity, and a failed scheduled run only notifies whoever last edited the cron
+# (no team routing here). So this alarm is a backstop, NOT a substitute for the
+# committed digest pin in Semgrep.yml — do not rely on it as the sole control. If
+# stronger routing is wanted later, add an issue-creating or Slack step (would need
+# additional permissions, intentionally omitted here to keep this job read-only).
+name: Semgrep image pin freshness
+on:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  freshness:
+    name: Pinned Semgrep image age
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Fail if the pinned Semgrep image digest is stale
+        run: |
+          # NOTE: GitHub runs this as `bash -e {0}`; `set -uo pipefail` does not clear
+          # that injected -e. Every command substitution whose failure must be handled
+          # by a guard below (rather than aborting the step with no annotation) is
+          # suffixed with `|| true` — otherwise a non-matching grep, a SIGPIPE from
+          # `| head`, or a registry error would exit the step before the guard runs,
+          # leaving a bare red square with no ::error:: (the trap fixed in PR #37).
+          set -uo pipefail
+          MAX_AGE_DAYS=45
+          repo="returntocorp/semgrep"
+
+          pinned=$(grep -oE 'returntocorp/semgrep@sha256:[0-9a-f]{64}' \
+            .github/workflows/Semgrep.yml | head -n1 | cut -d@ -f2 || true)
+          if [ -z "${pinned:-}" ]; then
+            echo "::error::Could not find a returntocorp/semgrep@sha256 pin in .github/workflows/Semgrep.yml"
+            exit 1
+          fi
+
+          token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
+            | jq -r .token || true)
+          if [ -z "${token:-}" ] || [ "${token}" = "null" ]; then
+            echo "::error::Could not obtain a Docker registry auth token for ${repo} (registry auth failure)"
+            exit 1
+          fi
+
+          man=$(curl -fsS -H "Authorization: Bearer ${token}" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+            "https://registry-1.docker.io/v2/${repo}/manifests/${pinned}" || true)
+          if [ -z "${man:-}" ]; then
+            echo "::error::Could not fetch the manifest for pinned digest ${pinned} (registry unreachable or digest gone)"
+            exit 1
+          fi
+
+          # Multi-arch index: descend into the linux/amd64 child image manifest.
+          child=$(printf '%s' "${man}" \
+            | jq -r '(.manifests // [])[] | select(.platform.os=="linux" and .platform.architecture=="amd64") | .digest' \
+            | head -n1 || true)
+          if [ -n "${child:-}" ] && [ "${child}" != "null" ]; then
+            imgman=$(curl -fsS -H "Authorization: Bearer ${token}" \
+              -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+              -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+              "https://registry-1.docker.io/v2/${repo}/manifests/${child}" || true)
+          else
+            imgman="${man}"
+          fi
+          if [ -z "${imgman:-}" ]; then
+            echo "::error::Could not fetch the image manifest for pinned digest ${pinned}"
+            exit 1
+          fi
+
+          cfg=$(printf '%s' "${imgman}" | jq -r '.config.digest // empty' || true)
+          if [ -z "${cfg:-}" ]; then
+            echo "::error::Could not locate the image config descriptor for pinned digest ${pinned}"
+            exit 1
+          fi
+
+          created=$(curl -fsS -L -H "Authorization: Bearer ${token}" \
+            "https://registry-1.docker.io/v2/${repo}/blobs/${cfg}" | jq -r '.created // empty' || true)
+          if [ -z "${created:-}" ]; then
+            echo "::error::Could not read the created timestamp from the image config for ${pinned}"
+            exit 1
+          fi
+
+          created_epoch=$(date -u -d "${created}" +%s 2>/dev/null || true)
+          if [ -z "${created_epoch:-}" ]; then
+            echo "::error::Could not parse the image created timestamp: ${created}"
+            exit 1
+          fi
+          now_epoch=$(date -u +%s)
+          age_days=$(( (now_epoch - created_epoch) / 86400 ))
+
+          echo "pinned digest: ${pinned}"
+          echo "image created: ${created} (${age_days} days ago)"
+          if [ "${age_days}" -gt "${MAX_AGE_DAYS}" ]; then
+            echo "::error::Pinned Semgrep image is ${age_days} days old (> ${MAX_AGE_DAYS}) — re-resolve returntocorp/semgrep:latest and bump the digest in .github/workflows/Semgrep.yml"
+            exit 1
+          fi
+          echo "::notice::Pinned Semgrep image is ${age_days} days old (<= ${MAX_AGE_DAYS}); no action needed."
