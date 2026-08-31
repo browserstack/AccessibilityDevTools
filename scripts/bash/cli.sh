@@ -283,14 +283,28 @@ download_binary() {
   local pipefail_was_set=0
   case "$(set +o)" in *"-o pipefail"*) pipefail_was_set=1 ;; esac
   set -o pipefail
-  bsdtar -xvf "$BINARY_ZIP_PATH" -O | head -c "$max_decompressed" > "${BINARY_PATH}.tmp"
-  local extract_status=$?
+  # `|| extract_status=$?` rather than a bare pipeline: the shebang is `bash -il`, so the
+  # user's rc files are sourced, and if one of them sets `-e` a bare failing pipeline aborts
+  # the script here — skipping the diagnostics below and leaving ${BINARY_PATH}.tmp behind,
+  # the exact residue the publish-failure cleanup was added to prevent (DEVA11Y-484 review).
+  local extract_status=0
+  bsdtar -xvf "$BINARY_ZIP_PATH" -O | head -c "$max_decompressed" > "${BINARY_PATH}.tmp" || extract_status=$?
   [[ $pipefail_was_set -eq 1 ]] || set +o pipefail
 
   local extracted_size
   extracted_size=$(wc -c < "${BINARY_PATH}.tmp" 2>/dev/null || echo 0)
-  if [[ $extract_status -ne 0 || $extracted_size -ge $max_decompressed ]]; then
-    echo "BrowserStack CLI download failed or exceeds the maximum allowed size (200 MB). Aborting." >&2
+
+  # Size first, and `-ge` not `-gt`: head -c caps output at exactly $max_decompressed, so a
+  # file of exactly that size is indistinguishable from a truncated overflow and must be
+  # rejected. A bomb trips both this and extract_status (SIGPIPE), and the size message is
+  # the accurate one, so it is checked first.
+  if [[ $extracted_size -ge $max_decompressed ]]; then
+    echo "BrowserStack CLI archive exceeds the maximum allowed decompressed size (200 MB). Aborting." >&2
+    rm -f "${BINARY_PATH}.tmp"
+    return 1
+  fi
+  if [[ $extract_status -ne 0 ]]; then
+    echo "BrowserStack CLI archive could not be extracted (bsdtar exited $extract_status). Aborting." >&2
     rm -f "${BINARY_PATH}.tmp"
     return 1
   fi

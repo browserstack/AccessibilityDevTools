@@ -469,7 +469,12 @@ private struct BrowserStackCLIDownloader {
         }
         if limitState.exceeded {
             try? fileManager.removeItem(at: directory)
-            forwardExit(code: 1, message: "BrowserStack CLI archive rejected: \(limitState.reason). Aborting to prevent disk exhaustion.")
+            // THROW, do not forwardExit. forwardExit calls exit(), which skips every `defer`
+            // — including prepareArtifact's cleanup of the downloaded archive. Exiting here
+            // therefore left a <=100 MB archive in the cache on every guard trip, inside the
+            // control whose job is to prevent disk exhaustion (DEVA11Y-484 review). Throwing
+            // unwinds normally, both defers fire, and it matches locateExecutable's entry cap.
+            throw PluginError("BrowserStack CLI archive rejected: \(limitState.reason). Aborting to prevent disk exhaustion.")
         }
 
         if process.terminationReason != .exit || process.terminationStatus != 0 {
@@ -621,8 +626,17 @@ private struct BrowserStackCLIDownloader {
             try? fileManager.removeItem(at: tempURL)
             throw PluginError("BrowserStack CLI archive declares \(response.expectedContentLength) bytes, above the \(Self.maxCompressedBytes)-byte limit; refusing to download it.")
         }
-        let downloadedBytes = (try? fileManager.attributesOfItem(atPath: tempURL.path)[.size] as? Int64) ?? nil
-        if let downloadedBytes, downloadedBytes > Self.maxCompressedBytes {
+        // Fail CLOSED on an unreadable size. This is the load-bearing half of the compressed
+        // cap: expectedContentLength is -1 for chunked/unknown-length responses, so an
+        // attacker-controlled URL that omits Content-Length is caught only here. Reading via
+        // resourceValues(.fileSizeKey) — the same idiom extractionFootprint uses — rather than
+        // attributesOfItem[.size] as? Int64, which could yield nil and skip the cap silently
+        // (DEVA11Y-484 review).
+        guard let downloadedBytes = (try? tempURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) else {
+            try? fileManager.removeItem(at: tempURL)
+            throw PluginError("Could not determine the downloaded BrowserStack CLI archive's size; refusing to use it.")
+        }
+        if downloadedBytes > Self.maxCompressedBytes {
             try? fileManager.removeItem(at: tempURL)
             throw PluginError("BrowserStack CLI archive is \(downloadedBytes) bytes, above the \(Self.maxCompressedBytes)-byte limit; refusing to use it.")
         }
@@ -891,9 +905,20 @@ private func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int) {
     // bsdtar actually wrote — including dotfiles. locateExecutable skips hidden files
     // because it is searching for a binary, not measuring a footprint; the two use the
     // same ceiling but count deliberately different things (DEVA11Y-484 review).
-    guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) else {
-        // Fail CLOSED: a directory we just created being unreadable is not a "0 bytes"
-        // result, and returning (0, 0) would silently disable the guard for that poll.
+    // Fail CLOSED when the tree cannot be read. The `guard let ... else` below is NOT
+    // sufficient on its own: FileManager.enumerator(at:includingPropertiesForKeys:) does not
+    // return nil for a missing or unreadable directory — it routes errors to an errorHandler
+    // whose default is "skip and continue", so such a directory yields a valid enumerator
+    // that produces zero elements and the function returned (0, 0), i.e. "not exceeded", the
+    // exact silent guard-disable this was meant to prevent (DEVA11Y-484 review). Supplying
+    // the handler and reporting the ceiling makes the failure closed for real.
+    var enumerationFailed = false
+    guard let enumerator = fm.enumerator(
+        at: url,
+        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+        options: [],
+        errorHandler: { _, _ in enumerationFailed = true; return false }
+    ) else {
         return (Int64.max, Int.max)
     }
     var total: Int64 = 0
@@ -905,7 +930,9 @@ private func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int) {
             total += Int64(size)
         }
     }
-    return (total, count)
+    // Any enumeration error, at any depth, means the measurement is incomplete and must not
+    // be reported as "under the ceiling".
+    return enumerationFailed ? (Int64.max, Int.max) : (total, count)
 }
 
 /// Returns a rejection reason if the footprint under `directory` exceeds either ceiling.
