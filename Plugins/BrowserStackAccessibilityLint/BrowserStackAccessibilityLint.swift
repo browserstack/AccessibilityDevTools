@@ -504,17 +504,47 @@ private struct BrowserStackCLIDownloader {
         if process.terminationReason != .exit || process.terminationStatus != 0 {
             // Fall back to copying the file directly if it's already an executable.
             // Surface a BOUNDED excerpt. Draining stays unbounded — that is what stops bsdtar
-            // blocking — but what we SHOW must not be. A hostile archive can emit tens of
-            // thousands of near-identical warnings (measured: 4,000 `..` entries produce
-            // ~227 KB across 4,000 lines), and dumping that into a build log is its own
-            // denial of service (DEVA11Y-484 review).
-            let rawMessage = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let messageLines = rawMessage.split(separator: "\n", omittingEmptySubsequences: false)
+            // blocking — but what we SHOW must not be. The drain already caps retention at
+            // 64 KB, so this bounds what we RENDER: even 64 KB of near-identical warnings is
+            // unusable in Xcode's Issue Navigator. (For scale, 4,000 `..` entries emit ~205 KB
+            // across ~4,001 lines before the retention cap trims it.)
+            //
+            // Three properties are load-bearing, each earned from a measured failure:
+            //
+            // 1. Decode LOSSILY. `String(data:encoding:.utf8)` returns nil — not a partial
+            //    string — on any invalid sequence, and `?? ""` then discarded the WHOLE
+            //    diagnostic. Two paths reach that: a non-UTF-8 member name (tar names are
+            //    arbitrary bytes and bsdtar echoes them verbatim), and the drain's byte-wise
+            //    cap slicing a multi-byte scalar (14 of 129 cut points, measured).
+            // 2. Keep the HEAD *and* the TAIL. bsdtar streams per-entry warnings first and puts
+            //    the decisive cause last ("Truncated tar archive", then "Error exit delayed from
+            //    previous errors"). Head-only truncation dropped exactly the line support needs.
+            // 3. Bound BYTES as well as LINES. A line cap alone is bypassable: one pax entry with
+            //    a 60,000-character `..` path emits just 2 lines totalling ~60 KB, sailing
+            //    through a 20-line cap untouched (measured). Bound on the `utf8` view — String's
+            //    `prefix` counts CHARACTERS, so a naive byte cap lets ~4x through on multi-byte
+            //    input.
+            //
+            // Empty input must stay empty: line 528 relies on `message.isEmpty` to choose the
+            // generic fallback text (DEVA11Y-484 review).
             let maxMessageLines = 20
-            let message = messageLines.count > maxMessageLines
-                ? messageLines.prefix(maxMessageLines).joined(separator: "\n")
-                    + "\n… \(messageLines.count - maxMessageLines) further bsdtar message(s) omitted."
-                : rawMessage
+            let maxMessageBytes = 4096
+            let headLines = 10
+            let tailLines = 10
+            var message = String(decoding: stderrData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let messageLines = message.split(separator: "\n", omittingEmptySubsequences: false)
+            if messageLines.count > maxMessageLines {
+                let omitted = messageLines.count - headLines - tailLines
+                message = messageLines.prefix(headLines).joined(separator: "\n")
+                    + "\n… at least \(omitted) further bsdtar message(s) omitted"
+                    + " (stderr retention is capped at 64 KB, so the true count may be higher).\n"
+                    + messageLines.suffix(tailLines).joined(separator: "\n")
+            }
+            if message.utf8.count > maxMessageBytes {
+                message = String(decoding: Array(message.utf8.prefix(maxMessageBytes)), as: UTF8.self)
+                    + "\n… (truncated)"
+            }
             if fileManager.isExecutableFile(atPath: archiveURL.path) {
                 let destination = directory.appendingPathComponent(archiveURL.lastPathComponent)
                 if fileManager.fileExists(atPath: destination.path) {
