@@ -503,7 +503,18 @@ private struct BrowserStackCLIDownloader {
 
         if process.terminationReason != .exit || process.terminationStatus != 0 {
             // Fall back to copying the file directly if it's already an executable.
-            let message = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            // Surface a BOUNDED excerpt. Draining stays unbounded — that is what stops bsdtar
+            // blocking — but what we SHOW must not be. A hostile archive can emit tens of
+            // thousands of near-identical warnings (measured: 4,000 `..` entries produce
+            // ~227 KB across 4,000 lines), and dumping that into a build log is its own
+            // denial of service (DEVA11Y-484 review).
+            let rawMessage = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let messageLines = rawMessage.split(separator: "\n", omittingEmptySubsequences: false)
+            let maxMessageLines = 20
+            let message = messageLines.count > maxMessageLines
+                ? messageLines.prefix(maxMessageLines).joined(separator: "\n")
+                    + "\n… \(messageLines.count - maxMessageLines) further bsdtar message(s) omitted."
+                : rawMessage
             if fileManager.isExecutableFile(atPath: archiveURL.path) {
                 let destination = directory.appendingPathComponent(archiveURL.lastPathComponent)
                 if fileManager.fileExists(atPath: destination.path) {
