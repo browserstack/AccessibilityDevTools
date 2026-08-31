@@ -453,12 +453,36 @@ private struct BrowserStackCLIDownloader {
         let errorPipe = Pipe()
         process.standardError = errorPipe
 
+        // Drain stderr on a separate queue BEFORE waiting. bsdtar's stderr is a 64 KB pipe;
+        // if it fills, bsdtar blocks writing and waitUntilExit() never returns. Reading only
+        // after the wait (the previous shape) is a deadlock, and it is reachable from an
+        // archive that stays UNDER both ceilings, so the watchdog does not save us — it spins
+        // on `process.isRunning` forever alongside the hang. Measured: a 4,000-entry archive
+        // whose members all contain `..` decompresses to 0 bytes / 4,000 entries yet emits
+        // ~227 KB of "Path contains '..'" warnings and wedges extraction indefinitely
+        // (DEVA11Y-484 review). Capped so a chatty archive cannot balloon memory either.
+        let stderrLimit = 64 * 1024
+        var stderrData = Data()
+        let stderrQueue = DispatchQueue(label: "com.browserstack.a11y.bsdtar-stderr")
+        let stderrDrained = DispatchSemaphore(value: 0)
+        let stderrHandle = errorPipe.fileHandleForReading
+
         let limitState: ExtractionLimitState
         do {
             try process.run()
+            stderrQueue.async {
+                while let chunk = try? stderrHandle.read(upToCount: 4096), !chunk.isEmpty {
+                    if stderrData.count < stderrLimit {
+                        stderrData.append(chunk.prefix(stderrLimit - stderrData.count))
+                    }
+                    // Keep draining past the cap — discarding is what stops bsdtar blocking.
+                }
+                stderrDrained.signal()
+            }
             // Decompressed-size/entry guard (DEVA11Y-484); see the EXTRACTION GUARD block below.
             limitState = startExtractionWatchdog(on: process, directory: directory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries)
             process.waitUntilExit()
+            stderrDrained.wait()
         } catch {
             throw PluginError("Failed to launch bsdtar: \(error.localizedDescription)")
         }
@@ -479,7 +503,7 @@ private struct BrowserStackCLIDownloader {
 
         if process.terminationReason != .exit || process.terminationStatus != 0 {
             // Fall back to copying the file directly if it's already an executable.
-            let message = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let message = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if fileManager.isExecutableFile(atPath: archiveURL.path) {
                 let destination = directory.appendingPathComponent(archiveURL.lastPathComponent)
                 if fileManager.fileExists(atPath: destination.path) {
@@ -487,7 +511,10 @@ private struct BrowserStackCLIDownloader {
                 }
                 try fileManager.copyItem(at: archiveURL, to: destination)
             } else {
-                forwardExit(code: process.terminationStatus, message: message.isEmpty ? "bsdtar failed to extract BrowserStack CLI." : message)
+                // THROW for the same reason as the guard branch above: forwardExit calls exit()
+                // and skips prepareArtifact's defers, leaking the archive and the staging dir.
+                // SwiftPM flattens the exit code anyway, so nothing is lost (DEVA11Y-484 review).
+                throw PluginError(message.isEmpty ? "bsdtar failed to extract BrowserStack CLI." : message)
             }
         }
     }
@@ -899,7 +926,7 @@ private final class ExtractionLimitState {
 }
 
 /// Total bytes and entry count of all regular files under `url`.
-private func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int) {
+private func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int, measured: Bool) {
     let fm = FileManager.default
     // `.skipsHiddenFiles` is deliberately NOT set, so the entry count here matches what
     // bsdtar actually wrote — including dotfiles. locateExecutable skips hidden files
@@ -919,7 +946,7 @@ private func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int) {
         options: [],
         errorHandler: { _, _ in enumerationFailed = true; return false }
     ) else {
-        return (Int64.max, Int.max)
+        return (0, 0, false)
     }
     var total: Int64 = 0
     var count = 0
@@ -931,13 +958,18 @@ private func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int) {
         }
     }
     // Any enumeration error, at any depth, means the measurement is incomplete and must not
-    // be reported as "under the ceiling".
-    return enumerationFailed ? (Int64.max, Int.max) : (total, count)
+    // be reported as "under the ceiling". Signalled with measured = false rather than an
+    // infinite footprint, so callers can say "could not be measured" instead of reporting an
+    // I/O or permission failure as a size violation (DEVA11Y-484 review).
+    return (total, count, !enumerationFailed)
 }
 
 /// Returns a rejection reason if the footprint under `directory` exceeds either ceiling.
 private func footprintExceeded(at directory: URL, maxBytes: Int64, maxEntries: Int) -> String? {
     let footprint = extractionFootprint(at: directory)
+    if !footprint.measured {
+        return "extraction directory could not be measured"
+    }
     if footprint.bytes > maxBytes {
         return "decompressed size exceeds \(maxBytes / (1024 * 1024)) MB"
     }

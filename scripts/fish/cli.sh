@@ -262,12 +262,28 @@ download_binary() {
   # unknown (chunked responses), so the explicit size check below backstops that case —
   # otherwise an attacker-controlled endpoint could exhaust the disk during download, before
   # the checksum and the decompression guard ever run (DEVA11Y-484 review).
-  local resolved_url
-  resolved_url=$(curl -fR --max-filesize "$max_compressed" -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || {
-    echo "CLI download failed or exceeds the maximum allowed download size (100 MB)." >&2
+  local resolved_url curl_status=0
+  resolved_url=$(curl -fR --max-filesize "$max_compressed" -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || curl_status=$?
+  if [[ $curl_status -ne 0 ]]; then
+    # Distinguish a size abort from a network failure by what landed on disk rather than by
+    # curl's exit code: --max-filesize is documented to exit 63, but measured against this
+    # endpoint (which 302s to sdk-assets) curl aborts during receive and exits 56 instead, so
+    # branching on 63 alone would misreport the common case (DEVA11Y-484 review).
+    local partial_size
+    partial_size=$(wc -c < "$BINARY_ZIP_PATH" 2>/dev/null || echo 0)
+    if [[ $partial_size -ge $max_compressed ]]; then
+      echo "BrowserStack CLI archive exceeds the maximum allowed download size (100 MB). Aborting." >&2
+    else
+      echo "BrowserStack CLI download failed (curl exited $curl_status)." >&2
+    fi
+    # Remove unconditionally, including on a transient network error. This deliberately gives
+    # up the -z If-Modified-Since fast path on the next run: a partial write carries a fresh
+    # mtime, so keeping it risks the next -z revalidation getting a 304 and handing a
+    # truncated archive to verify_binary_integrity. Losing a 304 is cheaper than trusting a
+    # truncated payload.
     rm -f "$BINARY_ZIP_PATH"
     return 1
-  }
+  fi
 
   local compressed_size
   compressed_size=$(wc -c < "$BINARY_ZIP_PATH" 2>/dev/null || echo 0)
