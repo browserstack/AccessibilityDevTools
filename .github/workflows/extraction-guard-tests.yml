@@ -1,0 +1,50 @@
+# Regression tests for the DEVA11Y-484 decompression-bomb extraction guard.
+#
+# Runs the shell-launcher suite: the real download_binary() from
+# scripts/{bash,zsh,fish}/cli.sh against locally generated archives, through a
+# curl shim that redirects only the hardcoded download URL. No network egress to
+# BrowserStack, no credentials, no mocks of bsdtar/head/curl.
+#
+# macos-latest ships bsdtar (libarchive), curl, python3 and awk, which is the
+# full dependency set. Ubuntu is not used: `tar` there is GNU tar, and the guard
+# under test is bsdtar-specific.
+name: Extraction Guard Tests
+
+on:
+  pull_request:
+    branches: ["master", "main"]
+    paths:
+      - "scripts/bash/cli.sh"
+      - "scripts/zsh/cli.sh"
+      - "scripts/fish/cli.sh"
+      - "tests/extraction-guard/**"
+      - ".github/workflows/extraction-guard-tests.yml"
+  push:
+    branches: ["master", "main"]
+
+permissions:
+  contents: read
+
+jobs:
+  extraction-guard:
+    name: extraction-guard / shell launchers
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+
+      - name: Show toolchain
+        run: |
+          bsdtar --version
+          curl --version | head -1
+          python3 --version
+          bash --version | head -1
+
+      - name: Syntax-check the launchers
+        run: |
+          for f in scripts/bash/cli.sh scripts/zsh/cli.sh scripts/fish/cli.sh; do
+            bash -n "$f" && echo "ok  $f"
+          done
+
+      - name: Run DEVA11Y-484 shell regression suite
+        run: bash tests/extraction-guard/run_tests.sh
