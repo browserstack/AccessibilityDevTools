@@ -519,14 +519,19 @@ private struct BrowserStackCLIDownloader {
             // 2. Keep the HEAD *and* the TAIL. bsdtar streams per-entry warnings first and puts
             //    the decisive cause last ("Truncated tar archive", then "Error exit delayed from
             //    previous errors"). Head-only truncation dropped exactly the line support needs.
-            // 3. Bound BYTES as well as LINES. A line cap alone is bypassable: one pax entry with
-            //    a 60,000-character `..` path emits just 2 lines totalling ~60 KB, sailing
-            //    through a 20-line cap untouched (measured). Bound on the `utf8` view — String's
-            //    `prefix` counts CHARACTERS, so a naive byte cap lets ~4x through on multi-byte
-            //    input.
+            // 3. Bound BYTES as well as LINES, and budget each END separately. A line cap
+            //    alone is bypassable: one pax entry with a 60,000-character `..` path emits
+            //    just 2 lines totalling ~60 KB, sailing through a 20-line cap untouched.
+            //    But a single byte cap over the *joined* head+notice+tail is also wrong: when
+            //    the head lines are individually large, the cut lands inside the head and
+            //    discards the notice AND the tail — silently undoing property 2 (measured:
+            //    25 head lines of ~500 B each dropped the "Truncated tar archive" cause).
+            //    So head and tail get half the budget each, clamped BEFORE they are joined.
+            //    Clamping is on the `utf8` view because String's `prefix` counts CHARACTERS,
+            //    which would let ~4x the cap through on multi-byte input.
             //
-            // Empty input must stay empty: line 528 relies on `message.isEmpty` to choose the
-            // generic fallback text (DEVA11Y-484 review).
+            // Empty input must stay empty: the throw below relies on `message.isEmpty` to
+            // choose the generic fallback text (DEVA11Y-484 review).
             let maxMessageLines = 20
             let maxMessageBytes = 4096
             let headLines = 10
@@ -535,15 +540,20 @@ private struct BrowserStackCLIDownloader {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let messageLines = message.split(separator: "\n", omittingEmptySubsequences: false)
             if messageLines.count > maxMessageLines {
+                let halfBudget = maxMessageBytes / 2
                 let omitted = messageLines.count - headLines - tailLines
-                message = messageLines.prefix(headLines).joined(separator: "\n")
+                let head = clampToUTF8Bytes(
+                    messageLines.prefix(headLines).joined(separator: "\n"), halfBudget)
+                // keepingEnd: the cause is the LAST line — clamp the tail from its end.
+                let tail = clampToUTF8Bytes(
+                    messageLines.suffix(tailLines).joined(separator: "\n"), halfBudget,
+                    keepingEnd: true)
+                message = head
                     + "\n… at least \(omitted) further bsdtar message(s) omitted"
                     + " (stderr retention is capped at 64 KB, so the true count may be higher).\n"
-                    + messageLines.suffix(tailLines).joined(separator: "\n")
-            }
-            if message.utf8.count > maxMessageBytes {
-                message = String(decoding: Array(message.utf8.prefix(maxMessageBytes)), as: UTF8.self)
-                    + "\n… (truncated)"
+                    + tail
+            } else {
+                message = clampToUTF8Bytes(message, maxMessageBytes)
             }
             if fileManager.isExecutableFile(atPath: archiveURL.path) {
                 let destination = directory.appendingPathComponent(archiveURL.lastPathComponent)
@@ -967,6 +977,27 @@ private final class ExtractionLimitState {
 }
 
 /// Total bytes and entry count of all regular files under `url`.
+/// Truncates `text` to at most `limit` UTF-8 BYTES, not characters.
+///
+/// `keepingEnd` selects WHICH end survives, and it is not cosmetic. When clamping the
+/// tail of a bsdtar excerpt the decisive cause is the LAST line, so keeping the tail's
+/// beginning discards exactly what the tail was retained for — measured: 8 large
+/// warnings ahead of "Truncated tar archive" pushed the cause out of a prefix-clamped
+/// tail (DEVA11Y-484 review).
+///
+/// `String.prefix` counts Characters, so using it as a byte cap lets roughly 4x the
+/// limit through on multi-byte input; the `utf8` view is the correct one. Decoding is
+/// lossy so a cut landing mid-scalar yields U+FFFD rather than nil —
+/// `String(data:encoding:.utf8)` would return nil and discard the whole diagnostic.
+private func clampToUTF8Bytes(_ text: String, _ limit: Int, keepingEnd: Bool = false) -> String {
+    guard text.utf8.count > limit else { return text }
+    let bytes = Array(text.utf8)
+    if keepingEnd {
+        return "… (truncated)\n" + String(decoding: bytes.suffix(limit), as: UTF8.self)
+    }
+    return String(decoding: bytes.prefix(limit), as: UTF8.self) + "… (truncated)"
+}
+
 private func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int, measured: Bool) {
     let fm = FileManager.default
     // `.skipsHiddenFiles` is deliberately NOT set, so the entry count here matches what
