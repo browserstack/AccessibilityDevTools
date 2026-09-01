@@ -25,10 +25,18 @@ for tool in bsdtar curl python3 awk; do
   }
 done
 
-if [ ! -f "$HERE/fixtures/legit.tar.gz" ]; then
+# Gate on the completion marker, NOT on any individual fixture. legit.tar.gz is
+# written first, so gating on it lets a concurrent run start reading while the later
+# fixtures are still being written — measured: 5 of 51 assertions failed that way.
+if [ ! -f "$HERE/fixtures/.complete" ]; then
   echo
   echo "▶ Generating fixtures (~106 MB, gitignored)"
   bash "$HERE/make_fixtures.sh" || exit 1
+fi
+
+if [ ! -f "$HERE/fixtures/.complete" ]; then
+  echo "FATAL: fixtures incomplete after generation." >&2
+  exit 1
 fi
 
 echo

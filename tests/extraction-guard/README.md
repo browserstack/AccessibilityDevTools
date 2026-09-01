@@ -49,6 +49,16 @@ test. The suite asserts on the *message*, which differs per path.
 **The expected file mode is read from `cli.sh`**, not hardcoded: main tightened it
 from `0775` to `0755` and a hardcoded expectation had already rotted.
 
+**Fixture generation is locked and marker-gated.** Generation is not atomic, and
+the first version gated on "does `legit.tar.gz` exist?" — which `make_fixtures.sh`
+creates *first*. A second run starting behind a generating one therefore saw the
+gate satisfied and read `bomb`/`manyfiles`/`multifile` while they were still being
+written, failing 5 of 51 assertions. This was not theoretical: a reviewer running
+the suite alongside another run hit it (1 run in 7). Generation now takes an
+atomic `mkdir` lock and writes a `.complete` marker last; `run_tests.sh` gates on
+that marker. Validated with 4 concurrent cold starts, a staggered cold start, and
+6 warm serial runs — all green.
+
 ## Mutation-validated
 
 Baseline green; each guard removal below flips it red:
