@@ -532,10 +532,16 @@ private struct BrowserStackCLIDownloader {
             //
             // Empty input must stay empty: the throw below relies on `message.isEmpty` to
             // choose the generic fallback text (DEVA11Y-484 review).
-            let maxMessageLines = 20
-            let maxMessageBytes = 4096
             let headLines = 10
             let tailLines = 10
+            // DERIVED, not an independent 20. `omitted` below is
+            // `count - headLines - tailLines`, and it stays >= 1 only because the
+            // threshold equals headLines + tailLines. Writing 20 here as its own
+            // literal made that a coincidence of three constants: bumping headLines
+            // alone would silently produce a negative "at least -3 further messages"
+            // in a user-facing error (DEVA11Y-484 review).
+            let maxMessageLines = headLines + tailLines
+            let maxMessageBytes = 4096
             var message = String(decoding: stderrData, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let messageLines = message.split(separator: "\n", omittingEmptySubsequences: false)
