@@ -90,6 +90,20 @@ make_oversized_download() {
   log "oversized-download.bin      ($(wc -c < oversized-download.bin) bytes > 100 MB cap)"
 }
 
+# --- 6b. legit ZIP: the format production actually serves ---
+# api.browserstack.com 302s to sdk-assets…/binary-macos-arm64-<ver>.zip, and cli.sh
+# names the path BINARY_ZIP_PATH — yet every other fixture here is .tar.gz. The guard
+# itself is format-independent (`head -c` plus a post-hoc `wc -c`), so this is fidelity
+# rather than a correctness hole, but a suite that never sees the real format is not
+# testing the real path (DEVA11Y-484 review).
+make_legit_zip() {
+  rm -rf _zip && mkdir _zip
+  cp "$REAL_BIN" _zip/browserstack-cli
+  bsdtar -a -cf legit.zip -C _zip browserstack-cli
+  rm -rf _zip
+  log "legit.zip                   ($(wc -c < legit.zip) bytes, real production format)"
+}
+
 # --- 6. corrupt: not a valid archive (bsdtar should fail cleanly) ---
 # /dev/urandom, not /dev/zero: an all-zero file is a VALID EMPTY tar archive (tar
 # terminates on two zero blocks), so zeros would make bsdtar exit 0 and the "corrupt"
@@ -101,6 +115,7 @@ make_corrupt() {
 
 echo "Generating fixtures in $DIR ..."
 make_legit
+make_legit_zip
 make_bomb
 make_manyfiles
 make_multifile

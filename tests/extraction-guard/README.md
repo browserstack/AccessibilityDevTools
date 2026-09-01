@@ -12,18 +12,29 @@ First run generates ~106 MB of fixtures into `fixtures/` (gitignored). Requires
 ## What it covers
 
 The **shell launchers**: the real `download_binary()` from
-`scripts/{bash,zsh,fish}/cli.sh`, 17 assertions per variant, 51 total.
+`scripts/{bash,zsh,fish}/cli.sh`, 20 assertions per variant, 60 total.
 
 | Case | Asserts |
 |---|---|
-| legit archive | exits 0, binary present, mode matches `cli.sh`, extracted binary runs |
+| legit `.tar.gz` | exits 0, binary present, mode matches that variant's `cli.sh`, extracted binary runs |
+| legit `.zip` | same — this is the format production actually serves |
 | 400 MB bomb | rejected **by the decompressed-size cap specifically**, partial file cleaned up |
-| 110 MB download | rejected at the download stage, no binary written |
+| 110 MB download | rejected *before extraction*, no binary written |
 | corrupt archive | rejected, and *not* misreported as a size rejection |
 | missing URL | rejected, no hang |
 | 20,000-entry archive | succeeds — `-O` streams to one file, so nothing lands per-entry |
 | multi-file archive | succeeds (pre-existing `-O` concatenation) |
 | bomb after a good download | rejected, and the already-cached good binary survives |
+
+Note on the 110 MB row: it asserts "rejected before extraction", **not** "the
+`--max-filesize` flag is present". Those are different claims — see the mutation
+table below.
+
+Note on the 20,000-entry row: it asserts no per-entry disk amplification, **not**
+that entry counts are capped. The shell path has no entry-count ceiling at all,
+unlike the Swift path's `maxArchiveEntries = 10_000`; and because `-O` concatenates,
+that archive publishes a 0-byte `browserstack-cli`. Pre-existing and outside this
+ticket's remediation, but a real gap rather than covered behaviour.
 
 ## How it avoids testing the wrong thing
 
@@ -40,6 +51,17 @@ past those, the suite fails loudly instead of quietly testing nothing.
 `api.browserstack.com` URL to a local `python3 -m http.server` and passes every
 other argument through, so `--max-filesize`, `-L`, `-z` and the
 `bsdtar | head -c` pipeline all execute for real. No network, no credentials.
+
+**The local server must be ours.** The port is derived from the PID, so an
+unrelated local service can already hold it. A bare "does anything answer?" probe
+would then succeed against *that* server, every fixture request would 404, and the
+run would fail with a dozen confusing per-case errors instead of "port busy".
+`start_server` therefore serves a random token and requires the responding server to
+return it, trying other ports otherwise.
+
+**The expected mode is read per variant.** The three `cli.sh` files are
+byte-identical in that region today, but reading bash's value for all three would
+check a zsh- or fish-only change against the wrong source.
 
 **Exit status alone is not trusted.** A bomb trips both the size check *and*
 `extract_status` (bsdtar takes SIGPIPE when `head -c` closes the pipe), so
@@ -63,18 +85,27 @@ that marker. Validated with 4 concurrent cold starts, a staggered cold start, an
 
 Baseline green; each guard removal below flips it red:
 
-| Mutation | Result |
+| Mutation | Caught by |
 |---|---|
-| disable the decompressed-size rejection | caught |
-| raise the decompressed cap to 4 GB | caught |
-| drop the `head -c` truncation | caught |
-| remove **both** compressed-cap layers | caught |
-| remove `--max-filesize` only | **stays green, by design** |
+| disable the decompressed-size rejection | behavioural assertion |
+| raise the decompressed cap to 4 GB | faithfulness grep |
+| drop the `head -c` truncation | faithfulness grep |
+| remove **both** compressed-cap layers | behavioural assertion |
+| remove `--max-filesize` only | faithfulness grep |
 
-That last row is not a gap. The compressed cap has two layers, and removing the
-flag leaves the explicit `compressed_size > max_compressed` backstop, which still
-rejects — measured: the full 105 MB downloads, then the backstop fires. Removing
-both layers is caught.
+That last row is the subtle one, and it is why the greps exist. The compressed cap
+has **two** layers: `--max-filesize` aborts the transfer pre-emptively, and an
+explicit `compressed_size > max_compressed` check backstops responses with no
+declared length. Removing the flag alone leaves the backstop, which still rejects —
+measured: the full 105 MB downloads, then the backstop fires and emits the same
+"maximum allowed download size" message. So **no behavioural assertion can detect
+that mutation**; every one stays green. Only the grep catches it, and it matters,
+because without the flag a chunked or undeclared-length response can write unbounded
+bytes to disk before any check runs.
+
+An earlier revision of this suite asserted the opposite in a code comment ("with the
+cap removed the failure moves to bsdtar"), which was false and contradicted this
+table. Fixed.
 
 ## Not covered
 

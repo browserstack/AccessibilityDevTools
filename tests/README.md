@@ -1,16 +1,22 @@
-# Integration test harnesses
+# Test harnesses
 
-End-to-end harnesses that integrate the `a11y-scan` command plugin from this
-repository into real consumer projects and run accessibility scans against
-sample sources with intentional issues. Each harness uses a **path dependency**
-on the repo root (`../..`), so it always exercises the local plugin sources.
+Two different kinds of suite live here.
 
-| Folder | Consumer type | How the plugin is integrated |
+**Integration harnesses** (`spm/`, `xcode-app/`) integrate the `a11y-scan` command
+plugin from this repository into real consumer projects and run accessibility scans
+against sample sources with intentional issues. Each uses a **path dependency** on
+the repo root (`../..`), so it always exercises the local plugin sources.
+
+**Regression suites** (`extraction-guard/`) test one hardened code path directly —
+no consumer project, no credentials, no network.
+
+| Folder | Kind | What it exercises |
 |---|---|---|
-| [`spm/`](./spm) | SwiftPM package | Package dependency on `AccessibilityDevTools`; the command plugin is invoked with `swift package plugin … scan`. |
-| [`xcode-app/`](./xcode-app) | Xcode iOS app (XcodeGen) | A pre-compile build phase runs the scan on every build — the official Xcode integration. |
+| [`spm/`](./spm) | Integration | SwiftPM consumer: package dependency on `AccessibilityDevTools`; the command plugin is invoked with `swift package plugin … scan`. |
+| [`xcode-app/`](./xcode-app) | Integration | Xcode iOS app (XcodeGen): a pre-compile build phase runs the scan on every build — the official Xcode integration. |
+| [`extraction-guard/`](./extraction-guard) | Regression | The DEVA11Y-484 decompression-bomb guard in the shell launchers (`scripts/{bash,zsh,fish}/cli.sh`). Run with `bash tests/extraction-guard/run_tests.sh`. |
 
-## Why two harnesses
+## Why two integration harnesses
 
 The plugin supports both project types the product targets — SwiftPM packages
 and Xcode apps — and they integrate the **command** plugin differently:
@@ -25,8 +31,10 @@ and Xcode apps — and they integrate the **command** plugin differently:
 
 ## Authentication
 
-Both harnesses need BrowserStack credentials to actually run a scan (the plugin
-downloads the CLI and makes authenticated calls):
+Both **integration** harnesses need BrowserStack credentials to actually run a scan
+(the plugin downloads the CLI and makes authenticated calls). The
+`extraction-guard/` regression suite needs none — it serves its own fixtures over
+localhost:
 
 ```bash
 export BROWSERSTACK_USERNAME=<your-username>

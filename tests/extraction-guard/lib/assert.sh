@@ -48,19 +48,52 @@ summary() {
 # ---- local static file server (python3) ----
 SERVER_PID=""
 SERVER_PORT=""
+SERVER_TOKEN_FILE=""
 
 start_server() {
   local root="$1"
-  # Pick a port deterministically-ish from PID to avoid clashes; fall back if taken.
-  SERVER_PORT=$(( 18000 + ($$ % 2000) ))
-  ( cd "$root" && exec python3 -m http.server "$SERVER_PORT" --bind 127.0.0.1 ) >/dev/null 2>&1 &
-  SERVER_PID=$!
-  # Wait until it answers.
-  for _ in $(seq 1 50); do
-    if curl -fsS "http://127.0.0.1:${SERVER_PORT}/" -o /dev/null 2>/dev/null; then return 0; fi
-    sleep 0.1
+  # A bare readiness probe ("does anything answer on this port?") is not enough. If an
+  # unrelated local service already holds the PID-derived port, the probe succeeds
+  # against IT, start_server returns 0, and every fixture request 404s — surfacing as a
+  # dozen confusing per-case failures rather than "port busy". The old comment here
+  # promised a fallback that was never implemented (DEVA11Y-484 review). So: serve a
+  # token, require the responding server to be OURS, and try other ports if not.
+  # Per-run filename, not a fixed one. A shared name is itself a concurrency bug:
+  # four simultaneous runs overwrite each other's token, every probe then reads a
+  # foreign value, and start_server exhausts all its ports and fails with no tests
+  # run at all. Measured — 2 of 4 concurrent cold starts died that way.
+  local token_file=".eg-token.$$.${RANDOM:-0}"
+  local token="eg-$$-${RANDOM:-0}"
+  if ! printf '%s' "$token" > "${root}/${token_file}" 2>/dev/null; then
+    echo "ERROR: cannot write probe token into $root" >&2
+    return 1
+  fi
+  SERVER_TOKEN_FILE="${root}/${token_file}"
+
+  local base=$(( 18000 + ($$ % 2000) ))
+  local attempt port got pid i
+  for attempt in 0 1 2 3 4 5 6 7 8 9; do
+    port=$(( base + attempt * 37 ))
+    [ "$port" -gt 64000 ] && port=$(( 18000 + attempt * 37 ))
+    ( cd "$root" && exec python3 -m http.server "$port" --bind 127.0.0.1 ) >/dev/null 2>&1 &
+    pid=$!
+    got=""
+    for i in $(seq 1 40); do
+      got=$(curl -fsS "http://127.0.0.1:${port}/${token_file}" 2>/dev/null || true)
+      [ -n "$got" ] && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if [ "$got" = "$token" ]; then
+      SERVER_PID="$pid"
+      SERVER_PORT="$port"
+      return 0
+    fi
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
   done
-  echo "ERROR: local server failed to start on port ${SERVER_PORT}" >&2
+
+  echo "ERROR: could not start a local server we own (tried 10 ports from ${base})" >&2
   return 1
 }
 
@@ -70,6 +103,11 @@ stop_server() {
     wait "$SERVER_PID" 2>/dev/null || true
   fi
   SERVER_PID=""
+  # Remove our own probe token so repeated runs do not litter the fixtures dir.
+  if [ -n "$SERVER_TOKEN_FILE" ]; then
+    rm -f "$SERVER_TOKEN_FILE" 2>/dev/null || true
+    SERVER_TOKEN_FILE=""
+  fi
 }
 
 url_for() { echo "http://127.0.0.1:${SERVER_PORT}/$1"; }

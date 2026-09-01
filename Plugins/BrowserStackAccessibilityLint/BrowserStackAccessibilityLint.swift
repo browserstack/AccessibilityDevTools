@@ -199,11 +199,16 @@ private struct BrowserStackCLIDownloader {
     }
 
     /// Best-effort removal of stale staging artifacts (`.tmp.*` files and directories) left
-    /// behind when a previous extraction was interrupted. The extract helpers call
-    /// forwardExit()/exit() on failure and SIGKILL can hit at any point, both of which
-    /// bypass the `defer` cleanup in prepareArtifact. Only entries older than one hour are
-    /// removed, so a concurrent build's in-flight staging directory is never deleted
-    /// mid-extraction.
+    /// behind when a previous extraction was interrupted.
+    ///
+    /// This no longer describes the bsdtar path: `extractLocalArchive` now throws instead
+    /// of calling `forwardExit()`, precisely so `prepareArtifact`'s `defer` cleanup DOES
+    /// run (DEVA11Y-484). Two routes still bypass those defers and keep this sweep
+    /// necessary — the Windows `unzip` path, which still reaches `forwardExit()` via
+    /// `run(process:errorDescription:)`, and SIGKILL, which can land at any point.
+    ///
+    /// Only entries older than one hour are removed, so a concurrent build's in-flight
+    /// staging directory is never deleted mid-extraction.
     private func sweepStaleStaging(in cacheRoot: URL) {
         let staleStagingAge: TimeInterval = 3600
         let now = Date()
