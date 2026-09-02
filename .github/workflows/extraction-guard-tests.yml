@@ -1,0 +1,75 @@
+# Regression tests for the DEVA11Y-484 decompression-bomb extraction guard.
+#
+# Runs the shell-launcher suite: the real download_binary() from
+# scripts/{bash,zsh,fish}/cli.sh against locally generated archives, through a
+# curl shim that redirects only the hardcoded download URL. No network egress to
+# BrowserStack, no credentials, no mocks of bsdtar/head/curl.
+#
+# macos-latest ships bsdtar (libarchive), curl, python3 and awk, which is the
+# full dependency set. Ubuntu is not used: `tar` there is GNU tar, and the guard
+# under test is bsdtar-specific.
+name: Extraction Guard Tests
+
+on:
+  pull_request:
+    branches: ["master", "main"]
+    paths:
+      - "scripts/bash/cli.sh"
+      - "scripts/zsh/cli.sh"
+      - "scripts/fish/cli.sh"
+      - "tests/extraction-guard/**"
+      - ".github/workflows/extraction-guard-tests.yml"
+  push:
+    branches: ["master", "main"]
+    # Same filter as the PR trigger. Without it every push to main runs a macOS job
+    # that generates ~106 MB of fixtures, billed at 10x, regardless of whether
+    # anything it tests changed — verify-selfupdate-checksums.yml filters both
+    # triggers for the same reason.
+    paths:
+      - "scripts/bash/cli.sh"
+      - "scripts/zsh/cli.sh"
+      - "scripts/fish/cli.sh"
+      - "tests/extraction-guard/**"
+      - ".github/workflows/extraction-guard-tests.yml"
+
+permissions:
+  contents: read
+
+# Three quick pushes to a PR would otherwise run three concurrent macOS jobs, each
+# generating its own 106 MB of fixtures. Matches spm-smoke-test.yml.
+concurrency:
+  group: extraction-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  extraction-guard:
+    name: extraction-guard / shell launchers
+    # Pinned, not macos-latest: the suite depends on bsdtar, python3, BSD `head -c`
+    # and BSD `stat -f` all being present, so an unannounced image roll can break it
+    # for reasons unrelated to the guard. spm-smoke-test.yml pins the same image.
+    runs-on: macos-14
+    # timeout-minutes is the ONLY hang backstop here — there is no per-case timeout
+    # and cli.sh's download has no --max-time. The suite completes in ~30s; the
+    # fixture lock waits at most 300s. 20 minutes is headroom for that role.
+    timeout-minutes: 20
+    steps:
+      # v4.2.2, matching the repo's three newest workflows. v3.5.3 is a Node16
+      # action; those emit deprecation annotations and are being removed from
+      # runner images, which would red out this job at checkout.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Show toolchain
+        run: |
+          bsdtar --version
+          curl --version | head -1
+          python3 --version
+          bash --version | head -1
+
+      - name: Syntax-check the launchers
+        run: |
+          for f in scripts/bash/cli.sh scripts/zsh/cli.sh scripts/fish/cli.sh; do
+            bash -n "$f" && echo "ok  $f"
+          done
+
+      - name: Run DEVA11Y-484 shell regression suite
+        run: bash tests/extraction-guard/run_tests.sh

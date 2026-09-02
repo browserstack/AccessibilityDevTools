@@ -241,21 +241,98 @@ verify_binary_integrity() {
 }
 
 download_binary() {
-  local resolved_url
-  resolved_url=$(curl -fR -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || {
-    echo "CLI download failed." >&2
+  local max_compressed=104857600   # 100 MB cap on the compressed download
+  local max_decompressed=209715200 # 200 MB cap on the decompressed binary
+
+  # --max-filesize aborts the transfer once the declared size is known to exceed the cap.
+  # Measured against this endpoint (which 302s to sdk-assets), curl bails with a non-zero
+  # exit and nothing written to disk. curl documents the flag as a no-op when the length is
+  # unknown (chunked responses), so the explicit size check below backstops that case —
+  # otherwise an attacker-controlled endpoint could exhaust the disk during download, before
+  # the checksum and the decompression guard ever run (DEVA11Y-484 review).
+  local resolved_url curl_status=0
+  resolved_url=$(curl -fR --max-filesize "$max_compressed" -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || curl_status=$?
+  if [[ $curl_status -ne 0 ]]; then
+    # Distinguish a size abort from a network failure by what landed on disk rather than by
+    # curl's exit code: --max-filesize is documented to exit 63, but measured against this
+    # endpoint (which 302s to sdk-assets) curl aborts during receive and exits 56 instead, so
+    # branching on 63 alone would misreport the common case (DEVA11Y-484 review).
+    local partial_size
+    partial_size=$(wc -c < "$BINARY_ZIP_PATH" 2>/dev/null || echo 0)
+    if [[ $partial_size -ge $max_compressed ]]; then
+      echo "BrowserStack CLI archive exceeds the maximum allowed download size (100 MB). Aborting." >&2
+    else
+      echo "BrowserStack CLI download failed (curl exited $curl_status)." >&2
+    fi
+    # Remove unconditionally, including on a transient network error. This deliberately gives
+    # up the -z If-Modified-Since fast path on the next run: a partial write carries a fresh
+    # mtime, so keeping it risks the next -z revalidation getting a 304 and handing a
+    # truncated archive to verify_binary_integrity. Losing a 304 is cheaper than trusting a
+    # truncated payload.
+    rm -f "$BINARY_ZIP_PATH"
     return 1
-  }
+  fi
+
+  local compressed_size
+  compressed_size=$(wc -c < "$BINARY_ZIP_PATH" 2>/dev/null || echo 0)
+  if [[ $compressed_size -gt $max_compressed ]]; then
+    echo "BrowserStack CLI archive exceeds the maximum allowed download size (100 MB). Aborting." >&2
+    rm -f "$BINARY_ZIP_PATH"
+    return 1
+  fi
+
   verify_binary_integrity "$BINARY_ZIP_PATH" "$resolved_url" || return $?
+
   # Extract to a temp path and atomically publish it. `> "$BINARY_PATH"` truncates the
   # destination before bsdtar is known to have succeeded, so a corrupt payload — the live
   # case today, since no sidecars are published yet and verification fails open — would
   # zero out a previously-good cached binary. Stage + mv keeps the cached binary intact
   # unless a fresh, extractable payload is in hand (DEVA11Y-473/474 review).
-  bsdtar -xvf "$BINARY_ZIP_PATH" -O > "${BINARY_PATH}.tmp" \
-    && chmod 0755 "${BINARY_PATH}.tmp" \
-    && mv -f "${BINARY_PATH}.tmp" "$BINARY_PATH" \
-    && strip_quarantine
+  #
+  # The decompression-bomb guard (DEVA11Y-484) sits on that same staged path: head -c stops
+  # bsdtar via SIGPIPE once the decompressed output reaches the cap, and pipefail surfaces
+  # that as a failure. Because the cap applies to ${BINARY_PATH}.tmp and publication is a
+  # later mv, a rejected bomb leaves any previously-cached binary untouched.
+  # Save and restore pipefail rather than clearing it: these scripts do not enable it
+  # globally today, but unconditionally turning it off would silently disable it for
+  # everything after download_binary if they ever do (DEVA11Y-484 review).
+  local pipefail_was_set=0
+  case "$(set +o)" in *"-o pipefail"*) pipefail_was_set=1 ;; esac
+  set -o pipefail
+  # `|| extract_status=$?` rather than a bare pipeline: the shebang is `bash -il`, so the
+  # user's rc files are sourced, and if one of them sets `-e` a bare failing pipeline aborts
+  # the script here — skipping the diagnostics below and leaving ${BINARY_PATH}.tmp behind,
+  # the exact residue the publish-failure cleanup was added to prevent (DEVA11Y-484 review).
+  local extract_status=0
+  bsdtar -xvf "$BINARY_ZIP_PATH" -O | head -c "$max_decompressed" > "${BINARY_PATH}.tmp" || extract_status=$?
+  [[ $pipefail_was_set -eq 1 ]] || set +o pipefail
+
+  local extracted_size
+  extracted_size=$(wc -c < "${BINARY_PATH}.tmp" 2>/dev/null || echo 0)
+
+  # Size first, and `-ge` not `-gt`: head -c caps output at exactly $max_decompressed, so a
+  # file of exactly that size is indistinguishable from a truncated overflow and must be
+  # rejected. A bomb trips both this and extract_status (SIGPIPE), and the size message is
+  # the accurate one, so it is checked first.
+  if [[ $extracted_size -ge $max_decompressed ]]; then
+    echo "BrowserStack CLI archive exceeds the maximum allowed decompressed size (200 MB). Aborting." >&2
+    rm -f "${BINARY_PATH}.tmp"
+    return 1
+  fi
+  if [[ $extract_status -ne 0 ]]; then
+    echo "BrowserStack CLI archive could not be extracted (bsdtar exited $extract_status). Aborting." >&2
+    rm -f "${BINARY_PATH}.tmp"
+    return 1
+  fi
+
+  # Clean the staged file up on *any* failure below, not just the size rejection above,
+  # so a failed chmod/mv never leaves a stray ${BINARY_PATH}.tmp in the cache.
+  if ! { chmod 0755 "${BINARY_PATH}.tmp" && mv -f "${BINARY_PATH}.tmp" "$BINARY_PATH"; }; then
+    echo "BrowserStack CLI: failed to publish the downloaded binary." >&2
+    rm -f "${BINARY_PATH}.tmp"
+    return 1
+  fi
+  strip_quarantine
 }
 
 # Self-update is opt-in (DEVA11Y-475): it runs only via the explicit `self-update`

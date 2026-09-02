@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Test-only curl shim. Lets the real, unmodified download_binary() run while
+# redirecting ONLY the hardcoded api.browserstack.com download URL to the local
+# test server. Every other argument (--max-filesize, -L, -o, -z, ...) is preserved,
+# so the security-relevant pipeline is exercised verbatim. Interception happens at
+# curl's CLI boundary; the shell function itself is never edited.
+set -u
+: "${REAL_CURL:?REAL_CURL must point at the real curl}"
+: "${TEST_DOWNLOAD_URL:?TEST_DOWNLOAD_URL must be set}"
+
+args=()
+for a in "$@"; do
+  case "$a" in
+    https://api.browserstack.com/sdk/v1/download_cli*) a="$TEST_DOWNLOAD_URL" ;;
+  esac
+  args+=("$a")
+done
+exec "$REAL_CURL" "${args[@]}"

@@ -170,6 +170,12 @@ private struct BrowserStackCLIDownloader {
 
     private var fileManager: FileManager { .default }
 
+    // Decompression-bomb guards (DEVA11Y-484). The CLI binary is a few tens of MB; these
+    // ceilings leave generous headroom while bounding a malicious archive's footprint.
+    private static let maxCompressedBytes: Int64 = 100 * 1024 * 1024   // 100 MB on the wire
+    private static let maxDecompressedBytes: Int64 = 200 * 1024 * 1024  // 200 MB on disk
+    private static let maxArchiveEntries = 10_000
+
     func ensureArtifact() async throws -> BrowserStackCLIArtifact {
         if let overrideURL {
             let info = try await resolveOverrideArtifact(from: overrideURL)
@@ -193,11 +199,16 @@ private struct BrowserStackCLIDownloader {
     }
 
     /// Best-effort removal of stale staging artifacts (`.tmp.*` files and directories) left
-    /// behind when a previous extraction was interrupted. The extract helpers call
-    /// forwardExit()/exit() on failure and SIGKILL can hit at any point, both of which
-    /// bypass the `defer` cleanup in prepareArtifact. Only entries older than one hour are
-    /// removed, so a concurrent build's in-flight staging directory is never deleted
-    /// mid-extraction.
+    /// behind when a previous extraction was interrupted.
+    ///
+    /// This no longer describes the bsdtar path: `extractLocalArchive` now throws instead
+    /// of calling `forwardExit()`, precisely so `prepareArtifact`'s `defer` cleanup DOES
+    /// run (DEVA11Y-484). Two routes still bypass those defers and keep this sweep
+    /// necessary — the Windows `unzip` path, which still reaches `forwardExit()` via
+    /// `run(process:errorDescription:)`, and SIGKILL, which can land at any point.
+    ///
+    /// Only entries older than one hour are removed, so a concurrent build's in-flight
+    /// staging directory is never deleted mid-extraction.
     private func sweepStaleStaging(in cacheRoot: URL) {
         let staleStagingAge: TimeInterval = 3600
         let now = Date()
@@ -447,16 +458,114 @@ private struct BrowserStackCLIDownloader {
         let errorPipe = Pipe()
         process.standardError = errorPipe
 
+        // Drain stderr on a separate queue BEFORE waiting. bsdtar's stderr is a 64 KB pipe;
+        // if it fills, bsdtar blocks writing and waitUntilExit() never returns. Reading only
+        // after the wait (the previous shape) is a deadlock, and it is reachable from an
+        // archive that stays UNDER both ceilings, so the watchdog does not save us — it spins
+        // on `process.isRunning` forever alongside the hang. Measured: a 4,000-entry archive
+        // whose members all contain `..` decompresses to 0 bytes / 4,000 entries yet emits
+        // ~227 KB of "Path contains '..'" warnings and wedges extraction indefinitely
+        // (DEVA11Y-484 review). Capped so a chatty archive cannot balloon memory either.
+        let stderrLimit = 64 * 1024
+        var stderrData = Data()
+        let stderrQueue = DispatchQueue(label: "com.browserstack.a11y.bsdtar-stderr")
+        let stderrDrained = DispatchSemaphore(value: 0)
+        let stderrHandle = errorPipe.fileHandleForReading
+
+        let limitState: ExtractionLimitState
         do {
             try process.run()
+            stderrQueue.async {
+                while let chunk = try? stderrHandle.read(upToCount: 4096), !chunk.isEmpty {
+                    if stderrData.count < stderrLimit {
+                        stderrData.append(chunk.prefix(stderrLimit - stderrData.count))
+                    }
+                    // Keep draining past the cap — discarding is what stops bsdtar blocking.
+                }
+                stderrDrained.signal()
+            }
+            // Decompressed-size/entry guard (DEVA11Y-484); see the EXTRACTION GUARD block below.
+            limitState = startExtractionWatchdog(on: process, directory: directory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries)
             process.waitUntilExit()
+            stderrDrained.wait()
         } catch {
             throw PluginError("Failed to launch bsdtar: \(error.localizedDescription)")
         }
 
+        // Catch a bomb that completed within a single watchdog poll interval (fast disk).
+        if !limitState.exceeded, let reason = footprintExceeded(at: directory, maxBytes: Self.maxDecompressedBytes, maxEntries: Self.maxArchiveEntries) {
+            limitState.markExceeded(reason)
+        }
+        if limitState.exceeded {
+            try? fileManager.removeItem(at: directory)
+            // THROW, do not forwardExit. forwardExit calls exit(), which skips every `defer`
+            // — including prepareArtifact's cleanup of the downloaded archive. Exiting here
+            // therefore left a <=100 MB archive in the cache on every guard trip, inside the
+            // control whose job is to prevent disk exhaustion (DEVA11Y-484 review). Throwing
+            // unwinds normally, both defers fire, and it matches locateExecutable's entry cap.
+            throw PluginError("BrowserStack CLI archive rejected: \(limitState.reason). Aborting to prevent disk exhaustion.")
+        }
+
         if process.terminationReason != .exit || process.terminationStatus != 0 {
             // Fall back to copying the file directly if it's already an executable.
-            let message = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            // Surface a BOUNDED excerpt. Draining stays unbounded — that is what stops bsdtar
+            // blocking — but what we SHOW must not be. The drain already caps retention at
+            // 64 KB, so this bounds what we RENDER: even 64 KB of near-identical warnings is
+            // unusable in Xcode's Issue Navigator. (For scale, 4,000 `..` entries emit ~205 KB
+            // across ~4,001 lines before the retention cap trims it.)
+            //
+            // Three properties are load-bearing, each earned from a measured failure:
+            //
+            // 1. Decode LOSSILY. `String(data:encoding:.utf8)` returns nil — not a partial
+            //    string — on any invalid sequence, and `?? ""` then discarded the WHOLE
+            //    diagnostic. Two paths reach that: a non-UTF-8 member name (tar names are
+            //    arbitrary bytes and bsdtar echoes them verbatim), and the drain's byte-wise
+            //    cap slicing a multi-byte scalar (14 of 129 cut points, measured).
+            // 2. Keep the HEAD *and* the TAIL. bsdtar streams per-entry warnings first and puts
+            //    the decisive cause last ("Truncated tar archive", then "Error exit delayed from
+            //    previous errors"). Head-only truncation dropped exactly the line support needs.
+            // 3. Bound BYTES as well as LINES, and budget each END separately. A line cap
+            //    alone is bypassable: one pax entry with a 60,000-character `..` path emits
+            //    just 2 lines totalling ~60 KB, sailing through a 20-line cap untouched.
+            //    But a single byte cap over the *joined* head+notice+tail is also wrong: when
+            //    the head lines are individually large, the cut lands inside the head and
+            //    discards the notice AND the tail — silently undoing property 2 (measured:
+            //    25 head lines of ~500 B each dropped the "Truncated tar archive" cause).
+            //    So head and tail get half the budget each, clamped BEFORE they are joined.
+            //    Clamping is on the `utf8` view because String's `prefix` counts CHARACTERS,
+            //    which would let ~4x the cap through on multi-byte input.
+            //
+            // Empty input must stay empty: the throw below relies on `message.isEmpty` to
+            // choose the generic fallback text (DEVA11Y-484 review).
+            let headLines = 10
+            let tailLines = 10
+            // DERIVED, not an independent 20. `omitted` below is
+            // `count - headLines - tailLines`, and it stays >= 1 only because the
+            // threshold equals headLines + tailLines. Writing 20 here as its own
+            // literal made that a coincidence of three constants: bumping headLines
+            // alone would silently produce a negative "at least -3 further messages"
+            // in a user-facing error (DEVA11Y-484 review).
+            let maxMessageLines = headLines + tailLines
+            let maxMessageBytes = 4096
+            var message = String(decoding: stderrData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let messageLines = message.split(separator: "\n", omittingEmptySubsequences: false)
+            if messageLines.count > maxMessageLines {
+                let halfBudget = maxMessageBytes / 2
+                let omitted = messageLines.count - headLines - tailLines
+                let head = clampToUTF8Bytes(
+                    messageLines.prefix(headLines).joined(separator: "\n"), halfBudget)
+                // keepingEnd: the cause is the LAST line — clamp the tail from its end.
+                let tail = clampToUTF8Bytes(
+                    messageLines.suffix(tailLines).joined(separator: "\n"), halfBudget,
+                    keepingEnd: true)
+                message = head
+                    + "\n… at least \(omitted) further bsdtar message(s) omitted"
+                    + " (stderr retention is capped at 64 KB, so the true count may be higher).\n"
+                    + tail
+            } else {
+                message = clampToUTF8Bytes(message, maxMessageBytes)
+            }
             if fileManager.isExecutableFile(atPath: archiveURL.path) {
                 let destination = directory.appendingPathComponent(archiveURL.lastPathComponent)
                 if fileManager.fileExists(atPath: destination.path) {
@@ -464,7 +573,10 @@ private struct BrowserStackCLIDownloader {
                 }
                 try fileManager.copyItem(at: archiveURL, to: destination)
             } else {
-                forwardExit(code: process.terminationStatus, message: message.isEmpty ? "bsdtar failed to extract BrowserStack CLI." : message)
+                // THROW for the same reason as the guard branch above: forwardExit calls exit()
+                // and skips prepareArtifact's defers, leaking the archive and the staging dir.
+                // SwiftPM flattens the exit code anyway, so nothing is lost (DEVA11Y-484 review).
+                throw PluginError(message.isEmpty ? "bsdtar failed to extract BrowserStack CLI." : message)
             }
         }
     }
@@ -582,8 +694,42 @@ private struct BrowserStackCLIDownloader {
 
         let (tempURL, response) = try await URLSession.shared.download(from: url)
         if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
+            try? fileManager.removeItem(at: tempURL)
             throw PluginError("Failed to download BrowserStack CLI (HTTP \(httpResponse.statusCode)).")
         }
+
+        // Compressed-size cap (DEVA11Y-484 review). Without it a multi-GB *compressed*
+        // payload from an attacker-controlled URL (BROWSERSTACK_A11Y_CLI_DOWNLOAD_URL) is
+        // checksummed and handed to the extraction guard, which only ever bounds the
+        // *decompressed* footprint — so the archive itself is an unbounded surface.
+        //
+        // LIMITATION, stated plainly: URLSession.download(from:) has no byte-level hook, so
+        // these checks reject the archive *after* the transfer rather than aborting it
+        // mid-stream. They therefore prevent an oversized archive from being verified,
+        // extracted, published or executed, but they do NOT bound peak temporary disk during
+        // the transfer itself. Bounding that needs a URLSessionDownloadDelegate that cancels
+        // in didWriteData — deliberately left as a separate change (DEVA11Y-761) rather than
+        // rewriting this shared download path here. The shell launchers do abort pre-transfer,
+        // via curl --max-filesize.
+        if response.expectedContentLength > Self.maxCompressedBytes {
+            try? fileManager.removeItem(at: tempURL)
+            throw PluginError("BrowserStack CLI archive declares \(response.expectedContentLength) bytes, above the \(Self.maxCompressedBytes)-byte limit; refusing to download it.")
+        }
+        // Fail CLOSED on an unreadable size. This is the load-bearing half of the compressed
+        // cap: expectedContentLength is -1 for chunked/unknown-length responses, so an
+        // attacker-controlled URL that omits Content-Length is caught only here. Reading via
+        // resourceValues(.fileSizeKey) — the same idiom extractionFootprint uses — rather than
+        // attributesOfItem[.size] as? Int64, which could yield nil and skip the cap silently
+        // (DEVA11Y-484 review).
+        guard let downloadedBytes = (try? tempURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) else {
+            try? fileManager.removeItem(at: tempURL)
+            throw PluginError("Could not determine the downloaded BrowserStack CLI archive's size; refusing to use it.")
+        }
+        if downloadedBytes > Self.maxCompressedBytes {
+            try? fileManager.removeItem(at: tempURL)
+            throw PluginError("BrowserStack CLI archive is \(downloadedBytes) bytes, above the \(Self.maxCompressedBytes)-byte limit; refusing to use it.")
+        }
+
         if fileManager.fileExists(atPath: destination.path) {
             try fileManager.removeItem(at: destination)
         }
@@ -616,8 +762,16 @@ private struct BrowserStackCLIDownloader {
         )
 
         var fallback: URL?
+        var scanned = 0
 
         while let element = enumerator?.nextObject() as? URL {
+            scanned += 1
+            if scanned > Self.maxArchiveEntries {
+                // Bound enumeration so an archive packed with millions of entries can't turn
+                // locateExecutable into a CPU/IO drain (DEVA11Y-484).
+                throw PluginError("Extracted archive contains more than \(Self.maxArchiveEntries) entries; refusing to continue.")
+            }
+
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: element.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
                 continue
@@ -786,6 +940,153 @@ private let browserstackCLIPermissionDeniedExitCode: Int32 = 4
     }
 
 // MARK: - Error
+
+// === DEVA11Y-484 EXTRACTION GUARD ===
+//
+// Rationale: bsdtar writes decompressed bytes straight to disk, so bounding the
+// archive's *compressed* size says nothing about how much it expands to — useless
+// against a decompression bomb. Instead we poll the destination directory while
+// bsdtar runs and terminate it if the decompressed footprint crosses a byte OR
+// entry ceiling (the entry ceiling stops a "millions of tiny files" bomb that stays
+// small on disk).
+//
+// Containment assumption (load-bearing): `bsdtar -x` WITHOUT `-P` neutralises `..`,
+// absolute paths and symlink-through, so every write lands inside the `-C` directory we
+// poll. Adding `-P` would let writes escape that directory and the footprint poll would
+// measure nothing — do not add it (DEVA11Y-484 review).
+//
+// Applies to extractLocalArchive, which since #37 (DEVA11Y-473/474) is the single
+// non-Windows extraction path: the archive is downloaded to a file and checksum-
+// verified first, then extracted. Windows' unzip path has no streaming guard.
+
+/// Thread-safe flag shared between the extraction watchdog and the main flow.
+private final class ExtractionLimitState {
+    private let lock = NSLock()
+    private var didExceed = false
+    private var why = ""
+
+    func markExceeded(_ reason: String) {
+        lock.lock()
+        if !didExceed {
+            didExceed = true
+            why = reason
+        }
+        lock.unlock()
+    }
+
+    var exceeded: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didExceed
+    }
+
+    var reason: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return why
+    }
+}
+
+/// Total bytes and entry count of all regular files under `url`.
+/// Truncates `text` to at most `limit` UTF-8 BYTES, not characters.
+///
+/// `keepingEnd` selects WHICH end survives, and it is not cosmetic. When clamping the
+/// tail of a bsdtar excerpt the decisive cause is the LAST line, so keeping the tail's
+/// beginning discards exactly what the tail was retained for — measured: 8 large
+/// warnings ahead of "Truncated tar archive" pushed the cause out of a prefix-clamped
+/// tail (DEVA11Y-484 review).
+///
+/// `String.prefix` counts Characters, so using it as a byte cap lets roughly 4x the
+/// limit through on multi-byte input; the `utf8` view is the correct one. Decoding is
+/// lossy so a cut landing mid-scalar yields U+FFFD rather than nil —
+/// `String(data:encoding:.utf8)` would return nil and discard the whole diagnostic.
+private func clampToUTF8Bytes(_ text: String, _ limit: Int, keepingEnd: Bool = false) -> String {
+    guard text.utf8.count > limit else { return text }
+    let bytes = Array(text.utf8)
+    if keepingEnd {
+        return "… (truncated)\n" + String(decoding: bytes.suffix(limit), as: UTF8.self)
+    }
+    return String(decoding: bytes.prefix(limit), as: UTF8.self) + "… (truncated)"
+}
+
+private func extractionFootprint(at url: URL) -> (bytes: Int64, entries: Int, measured: Bool) {
+    let fm = FileManager.default
+    // `.skipsHiddenFiles` is deliberately NOT set, so the entry count here matches what
+    // bsdtar actually wrote — including dotfiles. locateExecutable skips hidden files
+    // because it is searching for a binary, not measuring a footprint; the two use the
+    // same ceiling but count deliberately different things (DEVA11Y-484 review).
+    // Fail CLOSED when the tree cannot be read. The `guard let ... else` below is NOT
+    // sufficient on its own: FileManager.enumerator(at:includingPropertiesForKeys:) does not
+    // return nil for a missing or unreadable directory — it routes errors to an errorHandler
+    // whose default is "skip and continue", so such a directory yields a valid enumerator
+    // that produces zero elements and the function returned (0, 0), i.e. "not exceeded", the
+    // exact silent guard-disable this was meant to prevent (DEVA11Y-484 review). Supplying
+    // the handler and reporting the ceiling makes the failure closed for real.
+    var enumerationFailed = false
+    guard let enumerator = fm.enumerator(
+        at: url,
+        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+        options: [],
+        errorHandler: { _, _ in enumerationFailed = true; return false }
+    ) else {
+        return (0, 0, false)
+    }
+    var total: Int64 = 0
+    var count = 0
+    for case let element as URL in enumerator {
+        count += 1
+        let values = try? element.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        if values?.isRegularFile == true, let size = values?.fileSize {
+            total += Int64(size)
+        }
+    }
+    // Any enumeration error, at any depth, means the measurement is incomplete and must not
+    // be reported as "under the ceiling". Signalled with measured = false rather than an
+    // infinite footprint, so callers can say "could not be measured" instead of reporting an
+    // I/O or permission failure as a size violation (DEVA11Y-484 review).
+    return (total, count, !enumerationFailed)
+}
+
+/// Returns a rejection reason if the footprint under `directory` exceeds either ceiling.
+private func footprintExceeded(at directory: URL, maxBytes: Int64, maxEntries: Int) -> String? {
+    let footprint = extractionFootprint(at: directory)
+    if !footprint.measured {
+        return "extraction directory could not be measured"
+    }
+    if footprint.bytes > maxBytes {
+        return "decompressed size exceeds \(maxBytes / (1024 * 1024)) MB"
+    }
+    if footprint.entries > maxEntries {
+        return "archive contains more than \(maxEntries) entries"
+    }
+    return nil
+}
+
+/// Starts a background watchdog that terminates `process` (bsdtar) if the decompressed
+/// footprint in `directory` exceeds the byte or entry ceiling.
+///
+/// This is a SOFT ceiling: bsdtar can write up to one poll interval's worth of data past
+/// the limit before it is killed, so peak disk use is roughly `maxBytes + (50 ms × disk
+/// write rate)` — the poll interval below is 50 ms. The goal is to prevent disk
+/// *exhaustion* by a multi-GB/TB bomb, not to enforce an exact byte count.
+/// Callers MUST also run `footprintExceeded` once the process exits, to catch a fast bomb
+/// that finished within a single poll interval.
+private func startExtractionWatchdog(on process: Process, directory: URL, maxBytes: Int64, maxEntries: Int) -> ExtractionLimitState {
+    let state = ExtractionLimitState()
+    let watchdog = Thread {
+        while process.isRunning {
+            if let reason = footprintExceeded(at: directory, maxBytes: maxBytes, maxEntries: maxEntries) {
+                state.markExceeded(reason)
+                process.terminate()
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+    }
+    watchdog.start()
+    return state
+}
+// === END DEVA11Y-484 EXTRACTION GUARD ===
 
 private struct PluginError: Error, CustomStringConvertible {
     let message: String
