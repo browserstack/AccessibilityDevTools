@@ -112,7 +112,7 @@ import PackageDescription
 let package = Package(
     name: "Dummy",
     dependencies: [
-        .package(url: "https://github.com/browserstack/AccessibilityDevTools.git", branch: "main")
+        .package(url: "https://github.com/browserstack/AccessibilityDevTools.git", revision: "0428b322b00494b19e44c20c37502a0ee31af642")
     ],
     targets: []
 )
