@@ -409,10 +409,11 @@ private struct BrowserStackCLIDownloader {
     /// SHA-256 sidecar (`<asset>.sha256`) before it is extracted, made executable and run.
     /// api.browserstack.com (control plane) 302-redirects to a versioned, immutable asset on
     /// the CDN/S3 (data plane); a checksum published next to that asset lets us detect a
-    /// tampered or corrupted binary. Semantics mirror the launcher self-update: fail CLOSED on
-    /// a mismatch, fail OPEN (warn + proceed) when no sidecar is published yet, so this is
-    /// non-breaking until the SDK-assets team ships the sidecars (the server-side half of the
-    /// fix). This is a download-integrity check, NOT an authenticity signature.
+    /// tampered or corrupted binary. Fails CLOSED on every path: a mismatch, and equally a
+    /// sidecar that cannot be derived, fetched or parsed, aborts before extraction. Treating
+    /// "no sidecar" as "skip verification" let anyone able to block or corrupt the sidecar
+    /// bypass the check entirely (DEVA11Y-473 security retest). This is a download-integrity
+    /// check, NOT an authenticity signature.
     private func verifyArchiveChecksum(archiveURL: URL, resolvedURL: URL) async throws {
         // Derive the sidecar from the asset's scheme/host/path only. Stripping any query
         // string keeps signed/presigned URLs (…zip?token=) from deriving a permanently-404
@@ -422,39 +423,34 @@ private struct BrowserStackCLIDownloader {
         sidecarComponents?.fragment = nil
         guard let strippedURL = sidecarComponents?.url,
               let sidecarURL = URL(string: strippedURL.absoluteString + ".sha256") else {
-            Diagnostics.remark("BrowserStackAccessibilityLint: could not derive checksum URL; skipping integrity check (DEVA11Y-473/474).")
-            return
+            throw PluginError("Could not derive the BrowserStack CLI checksum URL from \(resolvedURL.absoluteString); refusing to use the downloaded binary.")
         }
         var request = URLRequest(url: sidecarURL)
         request.httpShouldHandleCookies = false
         request.timeoutInterval = 30
         let body: Data
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await downloadSession.data(for: request)
+            try validateRedirects(response: response, requestedURL: sidecarURL)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                Diagnostics.remark("BrowserStackAccessibilityLint: no published checksum at \(sidecarURL.absoluteString); proceeding WITHOUT integrity verification (DEVA11Y-473/474).")
-                return
+                let status = (response as? HTTPURLResponse).map { "HTTP \($0.statusCode)" } ?? "no HTTP response"
+                throw PluginError("No BrowserStack CLI checksum available at \(sidecarURL.absoluteString) (\(status)); refusing to use the downloaded binary.")
             }
             body = data
+        } catch let error as PluginError {
+            throw error
         } catch {
-            Diagnostics.remark("BrowserStackAccessibilityLint: checksum fetch failed (\(error.localizedDescription)); proceeding WITHOUT integrity verification (DEVA11Y-473/474).")
-            return
+            throw PluginError("Failed to fetch the BrowserStack CLI checksum from \(sidecarURL.absoluteString) (\(error.localizedDescription)); refusing to use the downloaded binary.")
         }
-        // A published sidecar that is present but empty/unreadable is treated as a hard failure:
-        // once the server publishes checksums, a missing value must not silently downgrade to
-        // "no verification".
         guard let text = String(data: body, encoding: .utf8),
               let expected = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }).first.map(String.init),
               !expected.isEmpty else {
             throw PluginError("BrowserStack CLI checksum sidecar was empty or unreadable; refusing to use the downloaded binary.")
         }
-        // A non-empty body that is not a 64-char hex digest is a CDN/S3 error page answered
-        // 200 (e.g. an S3 `AccessDenied` XML), not a checksum. Fail OPEN rather than turning
-        // its first token into the "expected hash" and hard-failing every client on every
-        // run (DEVA11Y-473/474 review).
+        // Anything that is not a 64-char hex digest (e.g. a CDN/S3 error page answered 200) is
+        // not a checksum we can verify against, so it is a hard failure too.
         guard expected.count == 64, expected.allSatisfy({ $0.isHexDigit }) else {
-            Diagnostics.remark("BrowserStackAccessibilityLint: malformed checksum at \(sidecarURL.absoluteString); proceeding WITHOUT integrity verification (DEVA11Y-473/474).")
-            return
+            throw PluginError("Malformed BrowserStack CLI checksum at \(sidecarURL.absoluteString); refusing to use the downloaded binary.")
         }
         let actual = try sha256Hex(of: archiveURL)
         guard actual.caseInsensitiveCompare(expected) == .orderedSame else {
