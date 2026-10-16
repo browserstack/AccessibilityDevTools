@@ -109,6 +109,67 @@ private func parseOverride(urlString: String?) throws -> URL? {
     return url
 }
 
+// MARK: - Redirect policy (DEVA11Y-473)
+
+/// A redirect may only land on HTTPS on browserstack.com or one of its subdomains. Without
+/// this, a hop to an http:// URL (or an unrelated host) would be followed and the CLI
+/// archive downloaded from it. The *initial* URL is governed by `parseOverride` instead, so
+/// an explicit HTTPS override pointing at a mirror still works as long as it does not redirect
+/// off-domain.
+private func isAllowedRedirectTarget(_ url: URL) -> Bool {
+    guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else {
+        return false
+    }
+    return host == "browserstack.com" || host.hasSuffix(".browserstack.com")
+}
+
+@discardableResult
+private func requireAllowedRedirectTarget(_ url: URL) throws -> URL {
+    guard isAllowedRedirectTarget(url) else {
+        throw PluginError("Refusing to follow redirect to \(url.absoluteString): only https:// URLs on browserstack.com are allowed.")
+    }
+    return url
+}
+
+/// Vetoes every redirect hop URLSession would otherwise follow on its own, so a disallowed
+/// target is never contacted. Callers additionally check the response's final URL, which is
+/// the backstop on platforms whose Foundation does not consult the delegate.
+private final class RedirectPolicyDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        if let url = request.url, isAllowedRedirectTarget(url) {
+            completionHandler(request)
+        } else {
+            completionHandler(nil)
+        }
+    }
+}
+
+private let downloadSession = URLSession(
+    configuration: .default,
+    delegate: RedirectPolicyDelegate(),
+    delegateQueue: nil
+)
+
+/// Validates where a request actually ended up: an unfollowed (vetoed) redirect's Location,
+/// and the final URL if it differs from the one requested.
+private func validateRedirects(response: URLResponse, requestedURL: URL) throws {
+    if let http = response as? HTTPURLResponse,
+       (300..<400).contains(http.statusCode),
+       let location = http.value(forHTTPHeaderField: "Location"),
+       let target = URL(string: location, relativeTo: requestedURL)?.absoluteURL {
+        try requireAllowedRedirectTarget(target)
+    }
+    if let finalURL = response.url, finalURL != requestedURL {
+        try requireAllowedRedirectTarget(finalURL)
+    }
+}
+
 private func sanitizeArguments(_ arguments: [String]) -> [String] {
     var result: [String] = []
     var skipNext = false
@@ -641,14 +702,15 @@ private struct BrowserStackCLIDownloader {
         request.timeoutInterval = 30
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await downloadSession.data(for: request)
+            try validateRedirects(response: response, requestedURL: url)
             if let http = response as? HTTPURLResponse {
                 if http.statusCode == 405 || http.statusCode == 501 {
                     return try await followWithGet(for: url)
                 }
                 if let location = http.value(forHTTPHeaderField: "Location"),
                    let redirectURL = URL(string: location, relativeTo: url)?.absoluteURL {
-                    return redirectURL
+                    return try requireAllowedRedirectTarget(redirectURL)
                 }
             }
             if let finalURL = response.url {
@@ -671,11 +733,12 @@ private struct BrowserStackCLIDownloader {
         request.httpShouldHandleCookies = false
         request.timeoutInterval = 60
 
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await downloadSession.data(for: request)
+        try validateRedirects(response: response, requestedURL: url)
         if let http = response as? HTTPURLResponse,
            let location = http.value(forHTTPHeaderField: "Location"),
            let redirectURL = URL(string: location, relativeTo: url)?.absoluteURL {
-            return redirectURL
+            return try requireAllowedRedirectTarget(redirectURL)
         }
         guard let finalURL = response.url else {
             throw PluginError("Failed to resolve redirect for \(url.absoluteString).")
@@ -692,7 +755,13 @@ private struct BrowserStackCLIDownloader {
             return
         }
 
-        let (tempURL, response) = try await URLSession.shared.download(from: url)
+        let (tempURL, response) = try await downloadSession.download(from: url)
+        do {
+            try validateRedirects(response: response, requestedURL: url)
+        } catch {
+            try? fileManager.removeItem(at: tempURL)
+            throw error
+        }
         if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
             try? fileManager.removeItem(at: tempURL)
             throw PluginError("Failed to download BrowserStack CLI (HTTP \(httpResponse.statusCode)).")
