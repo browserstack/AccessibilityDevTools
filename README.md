@@ -213,7 +213,7 @@ You can then edit the `.git/hooks/pre-commit` file to customise the registered p
 ## Updating the launcher script
 The launcher scripts no longer update themselves automatically on every run. To pull the latest launcher on demand, run the `self-update` subcommand — the download is checked against a published SHA-256 checksum (an integrity check against corruption in transit, not an authenticity signature, since the script and its checksum share one origin) and is only applied if it matches.
 
-The BrowserStack CLI binary the scripts and the SwiftPM plugin download is verified the same way: when a `<asset>.sha256` checksum is published next to the binary, the download is checked against it (over HTTPS, on macOS/Linux/Windows) before it is extracted, made executable, or run, and a mismatch aborts. This is an integrity check, not an authenticity signature. Until that server-side checksum is published the verification is inert by design — the binary still downloads and runs — so it hardens the download as defense-in-depth rather than being a guarantee that holds today.
+The BrowserStack CLI binary the scripts and the SwiftPM plugin download is verified the same way: the download is checked against the `<asset>.sha256` checksum published next to the binary (over HTTPS, on macOS/Linux/Windows) before it is extracted, made executable, or run, and a mismatch aborts. This is an integrity check, not an authenticity signature. The SwiftPM plugin fails closed: if the checksum is missing, unreachable or malformed it refuses to run the binary, and it only follows download redirects to `https://` URLs on `browserstack.com`. The launcher scripts still proceed without verification when no checksum is published.
 
 Zsh
 ```zsh

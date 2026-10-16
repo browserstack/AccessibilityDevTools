@@ -109,6 +109,67 @@ private func parseOverride(urlString: String?) throws -> URL? {
     return url
 }
 
+// MARK: - Redirect policy (DEVA11Y-473)
+
+/// A redirect may only land on HTTPS on browserstack.com or one of its subdomains. Without
+/// this, a hop to an http:// URL (or an unrelated host) would be followed and the CLI
+/// archive downloaded from it. The *initial* URL is governed by `parseOverride` instead, so
+/// an explicit HTTPS override pointing at a mirror still works as long as it does not redirect
+/// off-domain.
+private func isAllowedRedirectTarget(_ url: URL) -> Bool {
+    guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else {
+        return false
+    }
+    return host == "browserstack.com" || host.hasSuffix(".browserstack.com")
+}
+
+@discardableResult
+private func requireAllowedRedirectTarget(_ url: URL) throws -> URL {
+    guard isAllowedRedirectTarget(url) else {
+        throw PluginError("Refusing to follow redirect to \(url.absoluteString): only https:// URLs on browserstack.com are allowed.")
+    }
+    return url
+}
+
+/// Vetoes every redirect hop URLSession would otherwise follow on its own, so a disallowed
+/// target is never contacted. Callers additionally check the response's final URL, which is
+/// the backstop on platforms whose Foundation does not consult the delegate.
+private final class RedirectPolicyDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        if let url = request.url, isAllowedRedirectTarget(url) {
+            completionHandler(request)
+        } else {
+            completionHandler(nil)
+        }
+    }
+}
+
+private let downloadSession = URLSession(
+    configuration: .default,
+    delegate: RedirectPolicyDelegate(),
+    delegateQueue: nil
+)
+
+/// Validates where a request actually ended up: an unfollowed (vetoed) redirect's Location,
+/// and the final URL if it differs from the one requested.
+private func validateRedirects(response: URLResponse, requestedURL: URL) throws {
+    if let http = response as? HTTPURLResponse,
+       (300..<400).contains(http.statusCode),
+       let location = http.value(forHTTPHeaderField: "Location"),
+       let target = URL(string: location, relativeTo: requestedURL)?.absoluteURL {
+        try requireAllowedRedirectTarget(target)
+    }
+    if let finalURL = response.url, finalURL != requestedURL {
+        try requireAllowedRedirectTarget(finalURL)
+    }
+}
+
 private func sanitizeArguments(_ arguments: [String]) -> [String] {
     var result: [String] = []
     var skipNext = false
@@ -348,10 +409,11 @@ private struct BrowserStackCLIDownloader {
     /// SHA-256 sidecar (`<asset>.sha256`) before it is extracted, made executable and run.
     /// api.browserstack.com (control plane) 302-redirects to a versioned, immutable asset on
     /// the CDN/S3 (data plane); a checksum published next to that asset lets us detect a
-    /// tampered or corrupted binary. Semantics mirror the launcher self-update: fail CLOSED on
-    /// a mismatch, fail OPEN (warn + proceed) when no sidecar is published yet, so this is
-    /// non-breaking until the SDK-assets team ships the sidecars (the server-side half of the
-    /// fix). This is a download-integrity check, NOT an authenticity signature.
+    /// tampered or corrupted binary. Fails CLOSED on every path: a mismatch, and equally a
+    /// sidecar that cannot be derived, fetched or parsed, aborts before extraction. Treating
+    /// "no sidecar" as "skip verification" let anyone able to block or corrupt the sidecar
+    /// bypass the check entirely (DEVA11Y-473 security retest). This is a download-integrity
+    /// check, NOT an authenticity signature.
     private func verifyArchiveChecksum(archiveURL: URL, resolvedURL: URL) async throws {
         // Derive the sidecar from the asset's scheme/host/path only. Stripping any query
         // string keeps signed/presigned URLs (…zip?token=) from deriving a permanently-404
@@ -361,39 +423,34 @@ private struct BrowserStackCLIDownloader {
         sidecarComponents?.fragment = nil
         guard let strippedURL = sidecarComponents?.url,
               let sidecarURL = URL(string: strippedURL.absoluteString + ".sha256") else {
-            Diagnostics.remark("BrowserStackAccessibilityLint: could not derive checksum URL; skipping integrity check (DEVA11Y-473/474).")
-            return
+            throw PluginError("Could not derive the BrowserStack CLI checksum URL from \(resolvedURL.absoluteString); refusing to use the downloaded binary.")
         }
         var request = URLRequest(url: sidecarURL)
         request.httpShouldHandleCookies = false
         request.timeoutInterval = 30
         let body: Data
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await downloadSession.data(for: request)
+            try validateRedirects(response: response, requestedURL: sidecarURL)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                Diagnostics.remark("BrowserStackAccessibilityLint: no published checksum at \(sidecarURL.absoluteString); proceeding WITHOUT integrity verification (DEVA11Y-473/474).")
-                return
+                let status = (response as? HTTPURLResponse).map { "HTTP \($0.statusCode)" } ?? "no HTTP response"
+                throw PluginError("No BrowserStack CLI checksum available at \(sidecarURL.absoluteString) (\(status)); refusing to use the downloaded binary.")
             }
             body = data
+        } catch let error as PluginError {
+            throw error
         } catch {
-            Diagnostics.remark("BrowserStackAccessibilityLint: checksum fetch failed (\(error.localizedDescription)); proceeding WITHOUT integrity verification (DEVA11Y-473/474).")
-            return
+            throw PluginError("Failed to fetch the BrowserStack CLI checksum from \(sidecarURL.absoluteString) (\(error.localizedDescription)); refusing to use the downloaded binary.")
         }
-        // A published sidecar that is present but empty/unreadable is treated as a hard failure:
-        // once the server publishes checksums, a missing value must not silently downgrade to
-        // "no verification".
         guard let text = String(data: body, encoding: .utf8),
               let expected = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }).first.map(String.init),
               !expected.isEmpty else {
             throw PluginError("BrowserStack CLI checksum sidecar was empty or unreadable; refusing to use the downloaded binary.")
         }
-        // A non-empty body that is not a 64-char hex digest is a CDN/S3 error page answered
-        // 200 (e.g. an S3 `AccessDenied` XML), not a checksum. Fail OPEN rather than turning
-        // its first token into the "expected hash" and hard-failing every client on every
-        // run (DEVA11Y-473/474 review).
+        // Anything that is not a 64-char hex digest (e.g. a CDN/S3 error page answered 200) is
+        // not a checksum we can verify against, so it is a hard failure too.
         guard expected.count == 64, expected.allSatisfy({ $0.isHexDigit }) else {
-            Diagnostics.remark("BrowserStackAccessibilityLint: malformed checksum at \(sidecarURL.absoluteString); proceeding WITHOUT integrity verification (DEVA11Y-473/474).")
-            return
+            throw PluginError("Malformed BrowserStack CLI checksum at \(sidecarURL.absoluteString); refusing to use the downloaded binary.")
         }
         let actual = try sha256Hex(of: archiveURL)
         guard actual.caseInsensitiveCompare(expected) == .orderedSame else {
@@ -641,14 +698,15 @@ private struct BrowserStackCLIDownloader {
         request.timeoutInterval = 30
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await downloadSession.data(for: request)
+            try validateRedirects(response: response, requestedURL: url)
             if let http = response as? HTTPURLResponse {
                 if http.statusCode == 405 || http.statusCode == 501 {
                     return try await followWithGet(for: url)
                 }
                 if let location = http.value(forHTTPHeaderField: "Location"),
                    let redirectURL = URL(string: location, relativeTo: url)?.absoluteURL {
-                    return redirectURL
+                    return try requireAllowedRedirectTarget(redirectURL)
                 }
             }
             if let finalURL = response.url {
@@ -671,11 +729,12 @@ private struct BrowserStackCLIDownloader {
         request.httpShouldHandleCookies = false
         request.timeoutInterval = 60
 
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await downloadSession.data(for: request)
+        try validateRedirects(response: response, requestedURL: url)
         if let http = response as? HTTPURLResponse,
            let location = http.value(forHTTPHeaderField: "Location"),
            let redirectURL = URL(string: location, relativeTo: url)?.absoluteURL {
-            return redirectURL
+            return try requireAllowedRedirectTarget(redirectURL)
         }
         guard let finalURL = response.url else {
             throw PluginError("Failed to resolve redirect for \(url.absoluteString).")
@@ -692,7 +751,13 @@ private struct BrowserStackCLIDownloader {
             return
         }
 
-        let (tempURL, response) = try await URLSession.shared.download(from: url)
+        let (tempURL, response) = try await downloadSession.download(from: url)
+        do {
+            try validateRedirects(response: response, requestedURL: url)
+        } catch {
+            try? fileManager.removeItem(at: tempURL)
+            throw error
+        }
         if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
             try? fileManager.removeItem(at: tempURL)
             throw PluginError("Failed to download BrowserStack CLI (HTTP \(httpResponse.statusCode)).")
