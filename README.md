@@ -219,7 +219,7 @@ The SwiftPM plugin verifies the BrowserStack CLI binary's code signature before 
 - **Windows:** the Authenticode signature must be valid and issued to BrowserStack, Inc.
 - **Linux:** the CLI build is not signed, so there is nothing to verify; the plugin relies on HTTPS alone. This residual risk is accepted on DEVA11Y-473 until the Linux build is signed or the API serves a digest.
 
-The plugin downloads only over HTTPS and only follows download redirects to `https://` URLs on `browserstack.com`. The launcher scripts do not yet verify the CLI binary's signature (tracked in DEVA11Y-474).
+The plugin downloads only over HTTPS and only follows download redirects to `https://` URLs on `browserstack.com`. The launcher scripts apply the same check on macOS, on every run before the binary is made executable or run: a binary that fails is refused and the cached download is discarded, so the next run fetches a fresh copy. On Linux they rely on HTTPS alone, under the same accepted risk.
 
 Zsh
 ```zsh
