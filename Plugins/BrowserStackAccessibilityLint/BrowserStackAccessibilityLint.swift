@@ -297,7 +297,15 @@ private struct BrowserStackCLIDownloader {
         let expectedExecutableURL = versionDirectory.appendingPathComponent(executableName, isDirectory: false)
 
         if !forceDownload, fileManager.isExecutableFile(atPath: expectedExecutableURL.path) {
-            return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
+            // Re-verify cached binaries too: a cache populated by an older plugin version was
+            // never verified. One that fails is discarded and downloaded again (DEVA11Y-473).
+            do {
+                try verifyExecutableSignature(at: expectedExecutableURL)
+                return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
+            } catch {
+                Diagnostics.remark("BrowserStackAccessibilityLint: cached CLI \(info.version) failed signature verification; downloading it again.")
+                try? fileManager.removeItem(at: versionDirectory)
+            }
         }
 
         // Extract into a unique staging directory and atomically publish it to the final
@@ -319,16 +327,11 @@ private struct BrowserStackCLIDownloader {
 
         // Download the archive to a sibling temp file *outside* the staging directory so a
         // failed cleanup (e.g. an AV scanner or indexer holding a handle) can never bake the
-        // .zip into the published version directory, and — crucially (DEVA11Y-473/474) — so we
-        // can verify the archive's integrity before it is extracted, made executable, and run.
-        // A leftover is a `.tmp.*` sibling that sweepStaleStaging reclaims later.
+        // .zip into the published version directory. A leftover is a `.tmp.*` sibling that
+        // sweepStaleStaging reclaims later.
         let archiveURL = cacheRoot.appendingPathComponent(".tmp.\(info.version).\(UUID().uuidString).zip")
         defer { try? fileManager.removeItem(at: archiveURL) }
         try await download(from: info.resolvedURL, to: archiveURL)
-        // Verify BEFORE extraction/exec, on every platform (DEVA11Y-473/474 review: Windows
-        // was previously left unverified). Streaming curl | bsdtar straight to disk (the old
-        // path) left no opportunity to check the payload; downloading to a file first does.
-        try await verifyArchiveChecksum(archiveURL: archiveURL, resolvedURL: info.resolvedURL)
         Diagnostics.remark("BrowserStackAccessibilityLint: Extracting CLI \(info.version)...")
         #if os(Windows)
         try unzip(archive: archiveURL, into: stagingDirectory)
@@ -351,9 +354,14 @@ private struct BrowserStackCLIDownloader {
             }
             try fileManager.moveItem(at: locatedBinary, to: stagedExecutableURL)
         }
+        // Verify BEFORE the binary is made executable, published or run (DEVA11Y-473).
+        try verifyExecutableSignature(at: stagedExecutableURL)
         try ensureExecutablePermissions(at: stagedExecutableURL)
 
         try publishVersionDirectory(from: stagingDirectory, to: versionDirectory, expectedExecutableURL: expectedExecutableURL)
+        // publishVersionDirectory may keep a binary a concurrent build published instead of
+        // ours, so verify what will actually run.
+        try verifyExecutableSignature(at: expectedExecutableURL)
         return BrowserStackCLIArtifact(version: info.version, executableURL: expectedExecutableURL)
     }
 
@@ -405,107 +413,72 @@ private struct BrowserStackCLIDownloader {
         }
     }
 
-    /// DEVA11Y-473/474: verify the downloaded CLI archive against a server-published
-    /// SHA-256 sidecar (`<asset>.sha256`) before it is extracted, made executable and run.
-    /// api.browserstack.com (control plane) 302-redirects to a versioned, immutable asset on
-    /// the CDN/S3 (data plane); a checksum published next to that asset lets us detect a
-    /// tampered or corrupted binary. Fails CLOSED on every path: a mismatch, and equally a
-    /// sidecar that cannot be derived, fetched or parsed, aborts before extraction. Treating
-    /// "no sidecar" as "skip verification" let anyone able to block or corrupt the sidecar
-    /// bypass the check entirely (DEVA11Y-473 security retest). This is a download-integrity
-    /// check, NOT an authenticity signature.
-    private func verifyArchiveChecksum(archiveURL: URL, resolvedURL: URL) async throws {
-        // Derive the sidecar from the asset's scheme/host/path only. Stripping any query
-        // string keeps signed/presigned URLs (…zip?token=) from deriving a permanently-404
-        // sidecar (…zip?token=.sha256), which would silently disable verification.
-        var sidecarComponents = URLComponents(url: resolvedURL, resolvingAgainstBaseURL: false)
-        sidecarComponents?.query = nil
-        sidecarComponents?.fragment = nil
-        guard let strippedURL = sidecarComponents?.url,
-              let sidecarURL = URL(string: strippedURL.absoluteString + ".sha256") else {
-            throw PluginError("Could not derive the BrowserStack CLI checksum URL from \(resolvedURL.absoluteString); refusing to use the downloaded binary.")
-        }
-        var request = URLRequest(url: sidecarURL)
-        request.httpShouldHandleCookies = false
-        request.timeoutInterval = 30
-        let body: Data
-        do {
-            let (data, response) = try await downloadSession.data(for: request)
-            try validateRedirects(response: response, requestedURL: sidecarURL)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                let status = (response as? HTTPURLResponse).map { "HTTP \($0.statusCode)" } ?? "no HTTP response"
-                throw PluginError("No BrowserStack CLI checksum available at \(sidecarURL.absoluteString) (\(status)); refusing to use the downloaded binary.")
-            }
-            body = data
-        } catch let error as PluginError {
-            throw error
-        } catch {
-            throw PluginError("Failed to fetch the BrowserStack CLI checksum from \(sidecarURL.absoluteString) (\(error.localizedDescription)); refusing to use the downloaded binary.")
-        }
-        guard let text = String(data: body, encoding: .utf8),
-              let expected = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }).first.map(String.init),
-              !expected.isEmpty else {
-            throw PluginError("BrowserStack CLI checksum sidecar was empty or unreadable; refusing to use the downloaded binary.")
-        }
-        // Anything that is not a 64-char hex digest (e.g. a CDN/S3 error page answered 200) is
-        // not a checksum we can verify against, so it is a hard failure too.
-        guard expected.count == 64, expected.allSatisfy({ $0.isHexDigit }) else {
-            throw PluginError("Malformed BrowserStack CLI checksum at \(sidecarURL.absoluteString); refusing to use the downloaded binary.")
-        }
-        let actual = try sha256Hex(of: archiveURL)
-        guard actual.caseInsensitiveCompare(expected) == .orderedSame else {
-            throw PluginError("BrowserStack CLI checksum mismatch; refusing to use the downloaded binary.\n  expected: \(expected)\n  actual:   \(actual)")
-        }
+    /// DEVA11Y-473: verify the CLI binary's code signature before it is made executable,
+    /// published or run, failing CLOSED. The CDN publishes no checksum, so instead of a digest
+    /// we check the signature BrowserStack already ships the binary with: that proves who
+    /// built it, which a compromised CDN/origin cannot forge.
+    ///   - macOS: `codesign --verify --strict` against a Developer ID requirement pinned to
+    ///     BrowserStack's Team ID.
+    ///   - Windows: Authenticode status must be Valid with a BrowserStack, Inc. signer.
+    ///   - Linux: the CLI build is unsigned, so there is nothing to verify. Security accepted
+    ///     that residual risk on DEVA11Y-473 until the Linux build is signed or the API serves
+    ///     a digest (SDK-6482).
+    private func verifyExecutableSignature(at binaryURL: URL) throws {
+        #if os(macOS)
+        let requirement = "=anchor apple generic"
+            + " and certificate 1[field.1.2.840.113635.100.6.2.6] exists"
+            + " and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+            + " and certificate leaf[subject.OU] = \"\(Self.appleTeamID)\""
+        try runSignatureCheck(
+            executable: URL(fileURLWithPath: "/usr/bin/codesign"),
+            arguments: ["--verify", "--strict", "-R", requirement, binaryURL.path],
+            binaryURL: binaryURL
+        )
+        #elseif os(Windows)
+        // Single quotes are doubled so the path stays a literal inside the PowerShell string.
+        let path = binaryURL.path.replacingOccurrences(of: "'", with: "''")
+        // .NET quotes RDN values that contain a comma (O="BrowserStack, Inc."), so the quotes
+        // are optional in the match.
+        let script = """
+        $s = Get-AuthenticodeSignature -LiteralPath '\(path)'
+        if ($s.Status -ne 'Valid') { [Console]::Error.WriteLine("Authenticode status: $($s.Status)"); exit 1 }
+        if ($s.SignerCertificate.Subject -notmatch '(^|,\\s*)O="?BrowserStack, Inc\\."?(,|$)') { [Console]::Error.WriteLine("Unexpected signer: $($s.SignerCertificate.Subject)"); exit 1 }
+        exit 0
+        """
+        try runSignatureCheck(
+            executable: URL(fileURLWithPath: "powershell.exe"),
+            arguments: ["-NoProfile", "-NonInteractive", "-Command", script],
+            binaryURL: binaryURL
+        )
+        #else
+        _ = binaryURL
+        Diagnostics.remark("BrowserStackAccessibilityLint: the Linux CLI build is unsigned; running it without signature verification (accepted risk, DEVA11Y-473).")
+        #endif
     }
 
-    /// SHA-256 of a file as a lowercase hex string. On Unix (macOS/Linux) it shells out to
-    /// `shasum`/`sha256sum`; on Windows it uses PowerShell's built-in `Get-FileHash`. This
-    /// avoids pulling CryptoKit/swift-crypto into the plugin (CryptoKit is Apple-only) while
-    /// still verifying on every platform the plugin builds for (DEVA11Y-473/474 review).
-    private func sha256Hex(of fileURL: URL) throws -> String {
+    #if os(macOS) || os(Windows)
+    private static let appleTeamID = "YQ5FZQ855D"
+
+    private func runSignatureCheck(executable: URL, arguments: [String], binaryURL: URL) throws {
         let process = Process()
-        let launchName: String
-        #if os(Windows)
-        // Windows ships no shasum/sha256sum; Get-FileHash is the built-in equivalent. The
-        // archive is a UUID-named temp file under the cache root, so single-quoting the
-        // literal path is safe (no embedded quotes to escape).
-        launchName = "powershell.exe"
-        process.executableURL = URL(fileURLWithPath: "powershell.exe")
-        process.arguments = ["-NoProfile", "-Command", "(Get-FileHash -Algorithm SHA256 -LiteralPath '\(fileURL.path)').Hash"]
-        #else
-        let tool: String
-        let toolArgs: [String]
-        if fileManager.isExecutableFile(atPath: "/usr/bin/shasum") || fileManager.isExecutableFile(atPath: "/bin/shasum") {
-            tool = "shasum"
-            toolArgs = ["-a", "256", fileURL.path]
-        } else {
-            tool = "sha256sum"
-            toolArgs = [fileURL.path]
-        }
-        launchName = tool
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [tool] + toolArgs
-        #endif
-        let out = Pipe()
-        process.standardOutput = out
-        let err = Pipe()
-        process.standardError = err
+        process.executableURL = executable
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
         do {
             try process.run()
         } catch {
-            throw PluginError("Unable to launch \(launchName) to verify the downloaded archive: \(error.localizedDescription)")
+            throw PluginError("Unable to launch \(executable.lastPathComponent) to verify the BrowserStack CLI signature: \(error.localizedDescription)")
         }
+        let stderr = errorPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let message = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            throw PluginError("Failed to compute SHA-256 of the downloaded archive: \(message.isEmpty ? launchName + " exited \(process.terminationStatus)" : message)")
+        guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+            let detail = String(decoding: stderr.prefix(4096), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            throw PluginError("BrowserStack CLI signature verification failed for \(binaryURL.path); refusing to run it.\(detail.isEmpty ? "" : "\n\(detail)")")
         }
-        let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        guard let hash = output.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" }).first.map(String.init), !hash.isEmpty else {
-            throw PluginError("Could not parse SHA-256 output for the downloaded archive.")
-        }
-        return hash
     }
+    #endif
 
     #if !os(Windows)
     private func extractLocalArchive(at archiveURL: URL, into directory: URL) throws {
@@ -765,7 +738,7 @@ private struct BrowserStackCLIDownloader {
 
         // Compressed-size cap (DEVA11Y-484 review). Without it a multi-GB *compressed*
         // payload from an attacker-controlled URL (BROWSERSTACK_A11Y_CLI_DOWNLOAD_URL) is
-        // checksummed and handed to the extraction guard, which only ever bounds the
+        // handed to the extraction guard, which only ever bounds the
         // *decompressed* footprint — so the archive itself is an unbounded surface.
         //
         // LIMITATION, stated plainly: URLSession.download(from:) has no byte-level hook, so
@@ -1021,8 +994,9 @@ private let browserstackCLIPermissionDeniedExitCode: Int32 = 4
 // measure nothing — do not add it (DEVA11Y-484 review).
 //
 // Applies to extractLocalArchive, which since #37 (DEVA11Y-473/474) is the single
-// non-Windows extraction path: the archive is downloaded to a file and checksum-
-// verified first, then extracted. Windows' unzip path has no streaming guard.
+// non-Windows extraction path: the archive is downloaded to a file, then extracted, and
+// the extracted binary's signature is verified before it is run. Windows' unzip path has
+// no streaming guard.
 
 /// Thread-safe flag shared between the extraction watchdog and the main flow.
 private final class ExtractionLimitState {
