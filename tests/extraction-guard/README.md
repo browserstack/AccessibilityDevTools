@@ -51,6 +51,12 @@ past those, the suite fails loudly instead of quietly testing nothing.
 `api.browserstack.com` URL to a local `python3 -m http.server` and passes every
 other argument through, so `--max-filesize`, `-L`, `-z` and the
 `bsdtar | head -c` pipeline all execute for real. No network, no credentials.
+The one exception is the DEVA11Y-473 transport checks, which a plain-http
+127.0.0.1 server can't satisfy. For a swapped URL the shim widens
+`--proto`/`--proto-redir` to `=http,https` and reports the production redirect
+target as `url_effective`. Cases 10 and 11 switch each of those off
+(`SHIM_KEEP_PROTO=1`, `SHIM_REAL_URL_EFFECTIVE=1`) to prove both checks refuse,
+and the extraction step greps for both.
 
 **The local server must be ours.** The port is derived from the PID, so an
 unrelated local service can already hold it. A bare "does anything answer?" probe

@@ -138,6 +138,19 @@ jobs:
       - name: Exercise verify_binary_signature (genuine / tampered / ad-hoc / unsigned)
         run: tests/launcher-signature/run_tests.sh matrix
 
+  # The launchers accept a CLI download only if curl's final URL is https on browserstack.com
+  # or a subdomain (DEVA11Y-473): on Linux there is no signature to check, so the accepted risk
+  # rests on that. Exercises is_allowed_download_url lifted from each launcher. Offline.
+  download-url-allowlist:
+    name: Launcher download URL allowlist
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Exercise is_allowed_download_url (allowed hosts / look-alikes / other schemes)
+        run: tests/launcher-signature/run_tests.sh url
+
   # The CDN publishes no checksum, so the launchers and the SwiftPM plugin trust the
   # binary's code signature, pinned to BrowserStack's Team ID. If a release is ever
   # signed differently (new team, lapsed certificate, unsigned build), every user's
