@@ -32,7 +32,7 @@ start_server "$FIXTURES" || exit 1
 # leaves them undefined, and the function then dies with exit 127 on the first call
 # — which looks exactly like a guard rejection and would make every abort assertion
 # pass for the wrong reason. Load the whole dependency set.
-DEPS=(_self_update_sha256 strip_quarantine verify_binary_signature download_binary)
+DEPS=(_self_update_sha256 strip_quarantine verify_binary_signature is_allowed_download_url download_binary)
 
 load_download_binary() {
   local variant="$1"
@@ -66,6 +66,13 @@ load_download_binary() {
     || { bad "$variant: extracted code lost the pre-emptive --max-filesize abort"; return 1; }
   grep -q 'max_decompressed=209715200' "$fn" \
     || { bad "$variant: extracted code lost the 200 MB decompressed cap"; return 1; }
+  # The transport checks (DEVA11Y-473). The curl shim widens the protocol flags and
+  # fakes url_effective for the fixture server, so these greps (and cases 10/11) are
+  # what fail if either check is dropped.
+  grep -q -- "--proto '=https' --proto-redir '=https'" "$fn" \
+    || { bad "$variant: extracted code lost the https-only curl restriction"; return 1; }
+  grep -q 'is_allowed_download_url "\$resolved_url"' "$fn" \
+    || { bad "$variant: extracted code lost the browserstack.com download host check"; return 1; }
 
   # shellcheck disable=SC1090
   source "$fn"
@@ -248,6 +255,28 @@ for variant in bash zsh fish; do
   else
     echo "  (skipping signature-gate case: needs macOS codesign)"
   fi
+
+  # 10. https-only transport (DEVA11Y-473): with the protocol flags passed through, curl
+  #     must refuse the plain-http fixture server, and nothing may be left on disk.
+  export SHIM_KEEP_PROTO=1
+  run_case "legit.tar.gz"
+  unset SHIM_KEEP_PROTO
+  assert_status "$LAST_STATUS" 1 "$variant https-only: plain-http download refused with exit 1"
+  assert_contains "$LAST_STDERR" "non-HTTPS URL" \
+    "$variant https-only: refused by the protocol restriction (not another guard)"
+  assert_absent "$LAST_CACHE/browserstack-cli.zip" "$variant https-only: no zip left behind"
+  assert_absent "$LAST_CACHE/browserstack-cli" "$variant https-only: no binary published"
+
+  # 11. Download host check (DEVA11Y-473): with the real url_effective (127.0.0.1), the
+  #     archive must be refused with exit 2 and discarded before extraction.
+  export SHIM_REAL_URL_EFFECTIVE=1
+  run_case "legit.tar.gz"
+  unset SHIM_REAL_URL_EFFECTIVE
+  assert_status "$LAST_STATUS" 2 "$variant download host: off-domain download refused with exit 2"
+  assert_contains "$LAST_STDERR" "not https on browserstack.com" \
+    "$variant download host: refused by the host check (not another guard)"
+  assert_absent "$LAST_CACHE/browserstack-cli.zip" "$variant download host: zip removed"
+  assert_absent "$LAST_CACHE/browserstack-cli" "$variant download host: no binary published"
 done
 
 summary
