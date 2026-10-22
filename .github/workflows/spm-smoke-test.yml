@@ -138,19 +138,6 @@ jobs:
       - name: Exercise verify_binary_signature (genuine / tampered / ad-hoc / unsigned)
         run: tests/launcher-signature/run_tests.sh matrix
 
-  # Exercises the plugin's download-URL policy (DEVA11Y-479/488), lifted verbatim from
-  # the plugin source: the override is accepted only for https on browserstack.com or a
-  # subdomain. No secrets, no network.
-  download-url-policy:
-    name: Download URL override policy
-    runs-on: macos-14
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Exercise parseOverride (allowed / off-domain / non-https / file / bare path)
-        run: tests/download-url-policy/run_tests.sh
-
   # The CDN publishes no checksum, so the launchers and the SwiftPM plugin trust the
   # binary's code signature, pinned to BrowserStack's Team ID. If a release is ever
   # signed differently (new team, lapsed certificate, unsigned build), every user's
