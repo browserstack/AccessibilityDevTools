@@ -32,7 +32,7 @@ start_server "$FIXTURES" || exit 1
 # leaves them undefined, and the function then dies with exit 127 on the first call
 # — which looks exactly like a guard rejection and would make every abort assertion
 # pass for the wrong reason. Load the whole dependency set.
-DEPS=(_self_update_sha256 strip_quarantine verify_binary_integrity download_binary)
+DEPS=(_self_update_sha256 strip_quarantine verify_binary_signature download_binary)
 
 load_download_binary() {
   local variant="$1"
@@ -78,11 +78,17 @@ load_download_binary() {
 # (bsdtar takes SIGPIPE when `head -c` closes the pipe), so asserting only
 # "exit 1" still passes with the size guard deleted — verified by mutation test.
 # The two paths emit different messages, so the message is the discriminator.
+#
+# OS defaults to linux: the fixtures are not signed BrowserStack binaries, so on macos
+# the real signature check (DEVA11Y-474) would refuse every one of them before the
+# extraction guard's outcome could be observed. On linux verify_binary_signature passes
+# through by design (accepted risk), so the guard is exercised with no stubs. Case 9
+# runs with OS=macos to prove the signature gate is wired into download_binary.
 run_case() {
   local fixture="$1"
   local cache
   cache="$(mktemp -d "$WORK/cache.XXXX")"
-  export OS=macos ARCH=arm64
+  export OS="${RUN_CASE_OS:-linux}" ARCH=arm64
   export BINARY_ZIP_PATH="$cache/browserstack-cli.zip"
   export BINARY_PATH="$cache/browserstack-cli"
   TEST_DOWNLOAD_URL="$(url_for "$fixture")"
@@ -217,6 +223,31 @@ for variant in bash zsh fish; do
   assert_status $? 1 "$variant cached-binary: bomb still rejected"
   assert_eq "$(cat "$GOOD_CACHE/browserstack-cli" 2>/dev/null)" "sentinel" \
     "$variant cached-binary: existing good binary left intact"
+
+  # 9. Signature gate (DEVA11Y-474): on macos the real verify_binary_signature runs
+  #    codesign on the extracted payload. legit.zip is not a signed BrowserStack binary,
+  #    so download_binary must refuse it with exit 2 before chmod/publish, remove the
+  #    staged binary AND the zip (so a 304 cannot re-serve it), and leave an existing
+  #    cached binary untouched. Function-level coverage of genuine/tampered/ad-hoc
+  #    binaries lives in tests/launcher-signature.
+  if [ "$(uname -s)" = "Darwin" ]; then
+    run_case "legit.tar.gz"
+    printf 'sentinel' > "$LAST_CACHE/browserstack-cli"
+    GOOD_CACHE="$LAST_CACHE"
+    export OS=macos BINARY_ZIP_PATH="$GOOD_CACHE/browserstack-cli.zip" BINARY_PATH="$GOOD_CACHE/browserstack-cli"
+    TEST_DOWNLOAD_URL="$(url_for legit.zip)"
+    export TEST_DOWNLOAD_URL
+    ( PATH="$SHIM_DIR:$PATH"; download_binary ) >/dev/null 2>"$GOOD_CACHE/sig-stderr.txt"
+    assert_status $? 2 "$variant signature: unsigned payload refused with exit 2"
+    assert_contains "$(cat "$GOOD_CACHE/sig-stderr.txt")" "signature verification failed" \
+      "$variant signature: refused by the SIGNATURE check (not another guard)"
+    assert_absent "$GOOD_CACHE/browserstack-cli.tmp" "$variant signature: staged binary removed"
+    assert_absent "$GOOD_CACHE/browserstack-cli.zip" "$variant signature: rejected zip removed"
+    assert_eq "$(cat "$GOOD_CACHE/browserstack-cli" 2>/dev/null)" "sentinel" \
+      "$variant signature: existing good binary left intact"
+  else
+    echo "  (skipping signature-gate case: needs macOS codesign)"
+  fi
 done
 
 summary

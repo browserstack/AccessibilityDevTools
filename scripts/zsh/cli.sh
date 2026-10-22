@@ -201,52 +201,29 @@ strip_quarantine() {
   fi
 }
 
-# DEVA11Y-473/474: verify the downloaded CLI archive against a server-published
-# SHA-256 sidecar before extracting and executing it. api.browserstack.com (the
-# control plane) 302-redirects to a versioned, immutable asset on the CDN/S3 (the
-# data plane); a checksum published next to that asset lets us detect a tampered
-# or corrupted binary before `chmod 0755` + exec. Semantics mirror self-update:
-# fail CLOSED on a checksum mismatch, fail OPEN (warn + proceed) when no sidecar
-# is published yet, so this stays non-breaking until the SDK-assets team ships the
-# sidecars (the server-side half of DEVA11Y-473/474).
-verify_binary_integrity() {
-  local zip_path="$1" resolved_url="$2" sum_url tmp_sum expected actual
-  if [[ -z "$resolved_url" ]]; then
-    echo "CLI download: could not resolve asset URL; skipping integrity check (DEVA11Y-473/474)." >&2
-    return 0
-  fi
-  # Derive the sidecar from the asset path only. Stripping any query string keeps
-  # signed/presigned URLs (…zip?token=) from deriving a permanently-404 sidecar
-  # (…zip?token=.sha256), which would silently disable verification.
-  sum_url="${resolved_url%%\?*}.sha256"
-  tmp_sum=$(mktemp "${TMPDIR:-/tmp}/bs-a11y-clisum.XXXXXX") || return 0
-  # shellcheck disable=SC2064
-  trap "rm -f -- '${tmp_sum}'" RETURN
-  if ! curl -fsSL --connect-timeout 10 --max-time 30 "$sum_url" -o "$tmp_sum" 2>/dev/null; then
-    echo "CLI download: no published checksum at ${sum_url}; proceeding WITHOUT integrity verification (DEVA11Y-473/474)." >&2
-    return 0
-  fi
-  expected=$(awk '{print $1; exit}' "$tmp_sum" | tr 'A-Z' 'a-z')
-  actual=$(_self_update_sha256 "$zip_path" | tr 'A-Z' 'a-z')
-  # A present-but-empty sidecar body is a hard failure: once the server publishes
-  # checksums, a blank value must not silently downgrade to "no verification".
-  if [[ -z "$expected" ]]; then
-    echo "CLI download: empty checksum at ${sum_url}; refusing to use the downloaded binary." >&2
-    rm -f -- "$zip_path"
-    return 2
-  fi
-  # A non-empty body that is NOT a 64-char hex digest is a CDN/S3 error page answered 200
-  # (e.g. an S3 `AccessDenied` XML), not a checksum. Its first token must not become the
-  # "expected hash" and hard-fail every client on every run; fail OPEN instead (DEVA11Y-473/474 review).
-  if ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "CLI download: malformed checksum at ${sum_url}; proceeding WITHOUT verification (DEVA11Y-473/474)." >&2
-    return 0
-  fi
-  if [[ -z "$actual" || "$expected" != "$actual" ]]; then
-    echo "CLI download: checksum mismatch; refusing to use the downloaded binary." >&2
-    echo "  expected: ${expected}" >&2
-    echo "  actual:   ${actual:-<empty>}" >&2
-    rm -f -- "$zip_path"
+# DEVA11Y-473/474: verify the extracted CLI binary's code signature before it is made
+# executable, published or run, failing CLOSED. The CDN publishes no checksum, so we
+# check the signature BrowserStack already ships the binary with: that proves who built
+# it, which a compromised CDN/origin cannot forge. Mirrors the SwiftPM plugin.
+#   - macOS: `codesign --verify --strict` against a Developer ID requirement pinned to
+#     BrowserStack's Team ID.
+#   - Linux: the CLI build is unsigned, so there is nothing to verify. Security accepted
+#     that residual risk on DEVA11Y-473 until the Linux build is signed or the API serves
+#     a digest (SDK-6482).
+verify_binary_signature() {
+  local binary_path="$1" team_id="YQ5FZQ855D" requirement codesign_out
+  case "$OS" in
+    linux) return 0 ;;
+    macos) ;;
+    *)
+      echo "BrowserStack CLI: cannot verify the binary's signature on ${OS}; refusing to run it." >&2
+      return 2
+      ;;
+  esac
+  requirement="=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"${team_id}\""
+  if ! codesign_out=$(/usr/bin/codesign --verify --strict -R "$requirement" "$binary_path" 2>&1); then
+    echo "BrowserStack CLI signature verification failed; refusing to run the downloaded binary." >&2
+    echo "  ${codesign_out}" >&2
     return 2
   fi
 }
@@ -260,7 +237,7 @@ download_binary() {
   # exit and nothing written to disk. curl documents the flag as a no-op when the length is
   # unknown (chunked responses), so the explicit size check below backstops that case —
   # otherwise an attacker-controlled endpoint could exhaust the disk during download, before
-  # the checksum and the decompression guard ever run (DEVA11Y-484 review).
+  # the signature check and the decompression guard ever run (DEVA11Y-484 review).
   local resolved_url curl_status=0
   resolved_url=$(curl -fR --max-filesize "$max_compressed" -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || curl_status=$?
   if [[ $curl_status -ne 0 ]]; then
@@ -278,8 +255,8 @@ download_binary() {
     # Remove unconditionally, including on a transient network error. This deliberately gives
     # up the -z If-Modified-Since fast path on the next run: a partial write carries a fresh
     # mtime, so keeping it risks the next -z revalidation getting a 304 and handing a
-    # truncated archive to verify_binary_integrity. Losing a 304 is cheaper than trusting a
-    # truncated payload.
+    # truncated archive to the extractor. Losing a 304 is cheaper than trusting a truncated
+    # payload.
     rm -f "$BINARY_ZIP_PATH"
     return 1
   fi
@@ -292,13 +269,10 @@ download_binary() {
     return 1
   fi
 
-  verify_binary_integrity "$BINARY_ZIP_PATH" "$resolved_url" || return $?
-
   # Extract to a temp path and atomically publish it. `> "$BINARY_PATH"` truncates the
-  # destination before bsdtar is known to have succeeded, so a corrupt payload — the live
-  # case today, since no sidecars are published yet and verification fails open — would
-  # zero out a previously-good cached binary. Stage + mv keeps the cached binary intact
-  # unless a fresh, extractable payload is in hand (DEVA11Y-473/474 review).
+  # destination before bsdtar is known to have succeeded, so a corrupt payload would zero
+  # out a previously-good cached binary. Stage + mv keeps the cached binary intact unless a
+  # fresh, extractable, correctly signed payload is in hand (DEVA11Y-473/474 review).
   #
   # The decompression-bomb guard (DEVA11Y-484) sits on that same staged path: head -c stops
   # bsdtar via SIGPIPE once the decompressed output reaches the cap, and pipefail surfaces
@@ -336,6 +310,16 @@ download_binary() {
     return 1
   fi
 
+  # Verify BEFORE chmod/publish. The archive is re-extracted on every run (even on a 304),
+  # so this also covers a cached zip. On failure drop the zip too, otherwise the next run's
+  # If-Modified-Since request gets a 304 and keeps re-extracting the same rejected payload.
+  local verify_status=0
+  verify_binary_signature "${BINARY_PATH}.tmp" || verify_status=$?
+  if [[ $verify_status -ne 0 ]]; then
+    rm -f "${BINARY_PATH}.tmp" "$BINARY_ZIP_PATH"
+    return $verify_status
+  fi
+
   # Clean the staged file up on *any* failure below, not just the size rejection above,
   # so a failed chmod/mv never leaves a stray ${BINARY_PATH}.tmp in the cache.
   if ! { chmod 0755 "${BINARY_PATH}.tmp" && mv -f "${BINARY_PATH}.tmp" "$BINARY_PATH"; }; then
@@ -366,8 +350,8 @@ if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
   exit 0
 fi
 
-# Abort before executing the CLI if the download or its integrity check failed
-# (checksum mismatch returns 2 from download_binary -> DEVA11Y-473/474).
+# Abort before executing the CLI if the download or its signature check failed
+# (a failed signature check returns 2 from download_binary -> DEVA11Y-473/474).
 download_binary || exit $?
 a11y_scan
 

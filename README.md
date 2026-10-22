@@ -213,7 +213,13 @@ You can then edit the `.git/hooks/pre-commit` file to customise the registered p
 ## Updating the launcher script
 The launcher scripts no longer update themselves automatically on every run. To pull the latest launcher on demand, run the `self-update` subcommand — the download is checked against a published SHA-256 checksum (an integrity check against corruption in transit, not an authenticity signature, since the script and its checksum share one origin) and is only applied if it matches.
 
-The BrowserStack CLI binary the scripts and the SwiftPM plugin download is verified the same way: when a `<asset>.sha256` checksum is published next to the binary, the download is checked against it (over HTTPS, on macOS/Linux/Windows) before it is extracted, made executable, or run, and a mismatch aborts. This is an integrity check, not an authenticity signature. Until that server-side checksum is published the verification is inert by design — the binary still downloads and runs — so it hardens the download as defense-in-depth rather than being a guarantee that holds today.
+The SwiftPM plugin verifies the BrowserStack CLI binary's code signature before it is made executable or run, including binaries already in its cache, and refuses to run a binary that fails:
+
+- **macOS:** `codesign --verify --strict`, requiring a Developer ID signature from BrowserStack's Apple Team ID `YQ5FZQ855D`.
+- **Windows:** the Authenticode signature must be valid and issued to BrowserStack, Inc.
+- **Linux:** the CLI build is not signed, so there is nothing to verify; the plugin relies on HTTPS alone. This residual risk is accepted on DEVA11Y-473 until the Linux build is signed or the API serves a digest.
+
+The plugin downloads only over HTTPS and only follows download redirects to `https://` URLs on `browserstack.com`. The launcher scripts apply the same check on macOS, on every run before the binary is made executable or run: a binary that fails is refused and the cached download is discarded, so the next run fetches a fresh copy. On Linux they rely on HTTPS alone, under the same accepted risk.
 
 Zsh
 ```zsh

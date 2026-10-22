@@ -39,7 +39,7 @@ ticket's remediation, but a real gap rather than covered behaviour.
 ## How it avoids testing the wrong thing
 
 **Functions are extracted verbatim.** `load_download_binary` lifts
-`_self_update_sha256`, `strip_quarantine`, `verify_binary_integrity` and
+`_self_update_sha256`, `strip_quarantine`, `verify_binary_signature` and
 `download_binary` straight out of `cli.sh` and sources them. Loading only
 `download_binary` leaves the others undefined, the function dies with exit 127,
 and *every abort assertion passes for the wrong reason* — so all four are loaded.
