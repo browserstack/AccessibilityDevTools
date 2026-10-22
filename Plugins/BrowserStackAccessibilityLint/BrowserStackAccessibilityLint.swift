@@ -897,7 +897,7 @@ private func extractVersion(from url: URL) -> String? {
         // Reject path traversal and non-semver characters
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-+"))
         guard version.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
-        guard !version.contains("..") else { return nil }
+        guard !version.contains(".."), version != "." else { return nil }
         return version
     }
     return nil

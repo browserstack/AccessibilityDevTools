@@ -18,7 +18,7 @@ extract() {
 
 {
   echo 'import Foundation'
-  for decl in 'private func parseOverride(' 'private func isAllowedRedirectTarget(' 'private struct PluginError'; do
+  for decl in 'private func parseOverride(' 'private func isAllowedRedirectTarget(' 'private func extractVersion(' 'private struct PluginError'; do
     body=$(extract "$decl")
     if [[ -z "$body" ]]; then
       echo "could not find '$decl' in $PLUGIN" >&2
@@ -78,7 +78,29 @@ for (input, wantAccept) in cases {
         failures += 1
     }
 }
-print("\(cases.count - failures)/\(cases.count) passed")
+// extractVersion: the version becomes a cache path component, so it must never be a
+// traversal segment or the cache root itself.
+let versionCases: [(String, String?)] = [
+    ("binary-macos-arm64-1.63.0.zip", "1.63.0"),
+    ("binary-macos-arm64-..zip", nil),
+    ("binary-macos-arm64-../../../.ssh.zip", nil),
+    ("binary-macos-arm64-..%2F..%2F.ssh.zip", nil),
+    ("binary-macos-arm64-1.0..2.zip", nil),
+    ("binary-macos-arm64-a%2Fb.zip", nil),
+    ("binary-macos-arm64-.zip", nil),
+]
+for (name, want) in versionCases {
+    let got = extractVersion(from: URL(string: "https://sdk-assets.browserstack.com/" + name)!)
+    if got == want {
+        print("ok    version \(want.map { "'\($0)'" } ?? "rejected") '\(name)'")
+    } else {
+        print("FAIL  version want \(want ?? "nil"), got \(got ?? "nil") '\(name)'")
+        failures += 1
+    }
+}
+
+let total = cases.count + versionCases.count
+print("\(total - failures)/\(total) passed")
 exit(failures == 0 ? 0 : 1)
 SWIFT
 } > "$WORK/policy.swift" || exit 1
