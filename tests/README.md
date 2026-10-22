@@ -7,7 +7,7 @@ plugin from this repository into real consumer projects and run accessibility sc
 against sample sources with intentional issues. Each uses a **path dependency** on
 the repo root (`../..`), so it always exercises the local plugin sources.
 
-**Regression suites** (`extraction-guard/`) test one hardened code path directly —
+**Regression suites** (`extraction-guard/`, `download-url-policy/`) test one hardened code path directly —
 no consumer project, no credentials, no network.
 
 | Folder | Kind | What it exercises |
@@ -15,6 +15,7 @@ no consumer project, no credentials, no network.
 | [`spm/`](./spm) | Integration | SwiftPM consumer: package dependency on `AccessibilityDevTools`; the command plugin is invoked with `swift package plugin … scan`. |
 | [`xcode-app/`](./xcode-app) | Integration | Xcode iOS app (XcodeGen): a pre-compile build phase runs the scan on every build — the official Xcode integration. |
 | [`extraction-guard/`](./extraction-guard) | Regression | The DEVA11Y-484 decompression-bomb guard in the shell launchers (`scripts/{bash,zsh,fish}/cli.sh`). Run with `bash tests/extraction-guard/run_tests.sh`. |
+| [`download-url-policy/`](./download-url-policy) | Regression | The DEVA11Y-479/488 download-URL override policy in the SwiftPM plugin (`parseOverride`). Run with `tests/download-url-policy/run_tests.sh`. |
 
 ## Why two integration harnesses
 
