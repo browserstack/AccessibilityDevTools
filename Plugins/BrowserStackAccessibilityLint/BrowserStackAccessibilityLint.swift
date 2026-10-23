@@ -106,16 +106,18 @@ private func parseOverride(urlString: String?) throws -> URL? {
     guard scheme.lowercased() == "https" else {
         throw PluginError("Unsupported URL scheme '\(scheme)' in download URL. Only HTTPS is allowed.")
     }
+    guard isAllowedRedirectTarget(url) else {
+        throw PluginError("Unsupported host '\(url.host ?? "")' in download URL. Only browserstack.com hosts are allowed.")
+    }
     return url
 }
 
-// MARK: - Redirect policy (DEVA11Y-473)
+// MARK: - Download host policy (DEVA11Y-473, DEVA11Y-479)
 
-/// A redirect may only land on HTTPS on browserstack.com or one of its subdomains. Without
-/// this, a hop to an http:// URL (or an unrelated host) would be followed and the CLI
-/// archive downloaded from it. The *initial* URL is governed by `parseOverride` instead, so
-/// an explicit HTTPS override pointing at a mirror still works as long as it does not redirect
-/// off-domain.
+/// The CLI archive may only come from HTTPS on browserstack.com or one of its subdomains.
+/// This governs both the override URL (`parseOverride`) and every redirect hop. Without it,
+/// an override or a hop to an http:// URL (or an unrelated host) would be followed and the
+/// CLI archive downloaded from it.
 private func isAllowedRedirectTarget(_ url: URL) -> Bool {
     guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else {
         return false
@@ -613,12 +615,7 @@ private struct BrowserStackCLIDownloader {
     #endif
 
     private func resolveOverrideArtifact(from url: URL) async throws -> ArtifactInfo {
-        let resolvedURL: URL
-        if url.isFileURL {
-            resolvedURL = url
-        } else {
-            resolvedURL = try await followRedirects(for: url)
-        }
+        let resolvedURL = try await followRedirects(for: url)
         let version = extractVersion(from: resolvedURL) ?? "override"
         return ArtifactInfo(version: version, resolvedURL: resolvedURL, executableName: executableFileName())
     }
@@ -716,14 +713,7 @@ private struct BrowserStackCLIDownloader {
     }
 
     private func download(from url: URL, to destination: URL) async throws {
-        if url.isFileURL {
-            if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
-            }
-            try fileManager.copyItem(at: url, to: destination)
-            return
-        }
-
+        try requireAllowedRedirectTarget(url)
         let (tempURL, response) = try await downloadSession.download(from: url)
         do {
             try validateRedirects(response: response, requestedURL: url)
@@ -907,7 +897,7 @@ private func extractVersion(from url: URL) -> String? {
         // Reject path traversal and non-semver characters
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-+"))
         guard version.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
-        guard !version.contains("..") else { return nil }
+        guard !version.contains(".."), version != "." else { return nil }
         return version
     }
     return nil
