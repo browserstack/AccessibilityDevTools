@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests for the SwiftPM plugin's download-URL policy (DEVA11Y-479/488): the
 # --download-url / BROWSERSTACK_A11Y_CLI_DOWNLOAD_URL override is accepted only for
-# https on browserstack.com or a subdomain. Lifts parseOverride, isAllowedRedirectTarget
-# and PluginError verbatim from the plugin source, so the cases run against the shipped
+# https on browserstack.com or a subdomain. Lifts parseOverride, isAllowedRedirectTarget,
+# RedirectPolicyDelegate, extractVersion and PluginError verbatim from the plugin source, so the cases run against the shipped
 # code rather than a copy. No network, no credentials.
 set -uo pipefail
 
@@ -18,7 +18,7 @@ extract() {
 
 {
   echo 'import Foundation'
-  for decl in 'private func parseOverride(' 'private func isAllowedRedirectTarget(' 'private func extractVersion(' 'private struct PluginError'; do
+  for decl in 'private func parseOverride(' 'private func isAllowedRedirectTarget(' 'private final class RedirectPolicyDelegate' 'private func extractVersion(' 'private struct PluginError'; do
     body=$(extract "$decl")
     if [[ -z "$body" ]]; then
       echo "could not find '$decl' in $PLUGIN" >&2
@@ -99,7 +99,45 @@ for (name, want) in versionCases {
     }
 }
 
-let total = cases.count + versionCases.count
+// RedirectPolicyDelegate applies the policy to every redirect hop: it must forward an
+// allowed https target and veto (hand back nil) anything else. The task is never resumed,
+// so nothing touches the network.
+private let delegate = RedirectPolicyDelegate()
+let session = URLSession(configuration: .ephemeral)
+let task = session.dataTask(with: URL(string: "https://api.browserstack.com/sdk/v1/download_cli")!)
+let redirectCases: [(String, Bool)] = [
+    ("https://sdk-assets.browserstack.com/cli/binary-1.2.3.zip", true),
+    ("https://browserstack.com/cli.zip", true),
+    ("http://sdk-assets.browserstack.com/cli/binary-1.2.3.zip", false),
+    ("https://evil.example/cli.zip", false),
+    ("https://evilbrowserstack.com/cli.zip", false),
+    ("https://browserstack.com.evil.example/cli.zip", false),
+    ("file:///tmp/cli.zip", false),
+]
+for (target, wantFollow) in redirectCases {
+    let response = HTTPURLResponse(
+        url: task.originalRequest!.url!, statusCode: 302, httpVersion: "HTTP/1.1",
+        headerFields: ["Location": target])!
+    let newRequest = URLRequest(url: URL(string: target)!)
+    var followed: URLRequest?? = .none
+    delegate.urlSession(session, task: task, willPerformHTTPRedirection: response,
+                        newRequest: newRequest) { followed = .some($0) }
+    guard case .some(let next) = followed else {
+        print("FAIL  redirect callback never called for '\(target)'")
+        failures += 1
+        continue
+    }
+    let didFollow = next?.url == newRequest.url
+    if didFollow == wantFollow {
+        print("ok    redirect \(wantFollow ? "follow" : "veto") '\(target)'")
+    } else {
+        print("FAIL  redirect want \(wantFollow ? "follow" : "veto"), got \(didFollow ? "follow" : "veto") '\(target)'")
+        failures += 1
+    }
+}
+task.cancel()
+
+let total = cases.count + versionCases.count + redirectCases.count
 print("\(total - failures)/\(total) passed")
 exit(failures == 0 ? 0 : 1)
 SWIFT
