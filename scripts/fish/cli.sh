@@ -229,6 +229,21 @@ verify_binary_signature() {
   fi
 }
 
+# Accept the archive only if curl's final URL (after redirects) is https on browserstack.com
+# or a subdomain. --proto-redir already refuses non-https hops; this pins the host. Nothing
+# checks the binary's signature on Linux, so the risk Security accepted on DEVA11Y-473 rests
+# on the archive coming from BrowserStack over HTTPS end to end.
+is_allowed_download_url() {
+  local url="$1" authority host
+  [[ "$url" == https://* ]] || return 1
+  authority="${url#https://}"
+  authority="${authority%%[/?#]*}"
+  authority="${authority##*@}"
+  host=$(printf '%s' "${authority%%:*}" | tr '[:upper:]' '[:lower:]')
+  host="${host%.}"
+  [[ "$host" == "browserstack.com" || "$host" == *.browserstack.com ]]
+}
+
 download_binary() {
   local max_compressed=104857600   # 100 MB cap on the compressed download
   local max_decompressed=209715200 # 200 MB cap on the decompressed binary
@@ -239,8 +254,10 @@ download_binary() {
   # unknown (chunked responses), so the explicit size check below backstops that case —
   # otherwise an attacker-controlled endpoint could exhaust the disk during download, before
   # the signature check and the decompression guard ever run (DEVA11Y-484 review).
+  # --proto/--proto-redir keep the request and every redirect on https; curl refuses any other
+  # scheme and exits 1 (DEVA11Y-473).
   local resolved_url curl_status=0
-  resolved_url=$(curl -fR --max-filesize "$max_compressed" -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || curl_status=$?
+  resolved_url=$(curl -fR --proto '=https' --proto-redir '=https' --max-filesize "$max_compressed" -z "$BINARY_ZIP_PATH" -L "https://api.browserstack.com/sdk/v1/download_cli?os=${OS}&os_arch=${ARCH}" -o "$BINARY_ZIP_PATH" -w '%{url_effective}') || curl_status=$?
   if [[ $curl_status -ne 0 ]]; then
     # Distinguish a size abort from a network failure by what landed on disk rather than by
     # curl's exit code: --max-filesize is documented to exit 63, but measured against this
@@ -250,6 +267,8 @@ download_binary() {
     partial_size=$(wc -c < "$BINARY_ZIP_PATH" 2>/dev/null || echo 0)
     if [[ $partial_size -ge $max_compressed ]]; then
       echo "BrowserStack CLI archive exceeds the maximum allowed download size (100 MB). Aborting." >&2
+    elif [[ $curl_status -eq 1 ]]; then
+      echo "BrowserStack CLI download was redirected to a non-HTTPS URL; refusing it." >&2
     else
       echo "BrowserStack CLI download failed (curl exited $curl_status)." >&2
     fi
@@ -260,6 +279,14 @@ download_binary() {
     # payload.
     rm -f "$BINARY_ZIP_PATH"
     return 1
+  fi
+
+  # Refuse before extracting anything. On a 304 url_effective is still the redirect target,
+  # so a cached zip is held to the same rule. Returns 2, like a failed signature check.
+  if ! is_allowed_download_url "$resolved_url"; then
+    echo "BrowserStack CLI download came from ${resolved_url:-<unknown URL>}, not https on browserstack.com; refusing it." >&2
+    rm -f "$BINARY_ZIP_PATH"
+    return 2
   fi
 
   local compressed_size
@@ -352,7 +379,8 @@ if [[ $SUBCOMMAND == "register-pre-commit-hook" ]]; then
 fi
 
 # Abort before executing the CLI if the download or its signature check failed
-# (a failed signature check returns 2 from download_binary -> DEVA11Y-473/474).
+# (a failed signature check or a download from outside browserstack.com returns 2
+# from download_binary -> DEVA11Y-473/474).
 download_binary || exit $?
 a11y_scan
 

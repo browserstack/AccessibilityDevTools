@@ -8,6 +8,9 @@
 #   run_tests.sh published  the latest published macOS arm64 and x64 CLIs satisfy the
 #                           Team-pinned requirement, so a re-signed release (new team or
 #                           certificate) turns CI red instead of breaking every launcher.
+#   run_tests.sh url        is_allowed_download_url accepts only https on browserstack.com
+#                           or a subdomain, and refuses look-alike hosts, userinfo tricks
+#                           and other schemes. Offline; runs on any OS.
 set -uo pipefail
 
 MODE="${1:-matrix}"
@@ -18,9 +21,10 @@ trap 'rm -rf "$WORK"' EXIT
 pass=0
 fail=0
 
-# Lift verify_binary_signature off a launcher (name() { ... } to the first bare }).
+# Lift a function off a launcher (name() { ... } to the first bare }).
+# extract <launcher> [function name, default verify_binary_signature]
 extract() {
-  awk 'index($0,"verify_binary_signature() {")==1{p=1} p{print} p&&/^}$/{exit}' "$ROOT/scripts/$1/cli.sh"
+  awk -v start="${2:-verify_binary_signature}() {" 'index($0,start)==1{p=1} p{print} p&&/^}$/{exit}' "$ROOT/scripts/$1/cli.sh"
 }
 
 # Download and extract the latest CLI for an arch; prints the binary's path.
@@ -85,10 +89,60 @@ run_published() {
   done
 }
 
+# check_url <launcher> <url> <expected rc: 0 allowed, 1 refused>
+check_url() {
+  local launcher="$1" url="$2" want="$3" fn rc
+  fn=$(extract "$launcher" is_allowed_download_url)
+  if [[ -z "$fn" ]]; then
+    echo "FAIL | $launcher | is_allowed_download_url not found in scripts/$launcher/cli.sh"
+    fail=$((fail + 1))
+    return
+  fi
+  bash -c "$fn"$'\n''is_allowed_download_url "$1"' _ "$url" && rc=0 || rc=$?
+  if [[ "$rc" == "$want" ]]; then
+    echo "PASS | $launcher | ${url:-<empty>} | rc=$rc"
+    pass=$((pass + 1))
+  else
+    echo "FAIL | $launcher | ${url:-<empty>} | got rc=$rc want rc=$want"
+    fail=$((fail + 1))
+  fi
+}
+
+run_url() {
+  local l url
+  local allowed=(
+    "https://sdk-assets.browserstack.com/binary-linux-x64-1.63.0.zip"
+    "https://api.browserstack.com/sdk/v1/download_cli?os=linux&os_arch=x64"
+    "https://browserstack.com/binary.zip"
+    "https://SDK-Assets.BrowserStack.COM/binary.zip"
+    "https://sdk-assets.browserstack.com:443/binary.zip"
+    "https://sdk-assets.browserstack.com./binary.zip"
+  )
+  local refused=(
+    ""
+    "http://sdk-assets.browserstack.com/binary.zip"
+    "ftp://sdk-assets.browserstack.com/binary.zip"
+    "https://evil.example/binary.zip"
+    "https://browserstack.com.evil.example/binary.zip"
+    "https://evilbrowserstack.com/binary.zip"
+    "https://browserstack.com@evil.example/binary.zip"
+    "https://sdk-assets.browserstack.com:443@evil.example/binary.zip"
+    "https://evil.example/@sdk-assets.browserstack.com/binary.zip"
+    "https://evil.example/?u=https://sdk-assets.browserstack.com/"
+    "https://evil.example#.browserstack.com"
+    "https://evil.example/.browserstack.com"
+  )
+  for l in "${LAUNCHERS[@]}"; do
+    for url in "${allowed[@]}"; do check_url "$l" "$url" 0; done
+    for url in "${refused[@]}"; do check_url "$l" "$url" 1; done
+  done
+}
+
 case "$MODE" in
   matrix) run_matrix ;;
   published) run_published ;;
-  *) echo "usage: $0 [matrix|published]" >&2; exit 64 ;;
+  url) run_url ;;
+  *) echo "usage: $0 [matrix|published|url]" >&2; exit 64 ;;
 esac
 
 echo "----"

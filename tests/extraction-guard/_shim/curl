@@ -4,15 +4,43 @@
 # test server. Every other argument (--max-filesize, -L, -o, -z, ...) is preserved,
 # so the security-relevant pipeline is exercised verbatim. Interception happens at
 # curl's CLI boundary; the shell function itself is never edited.
+#
+# Transport (DEVA11Y-473): download_binary restricts curl to https (--proto/--proto-redir
+# '=https') and accepts the archive only if url_effective is https on browserstack.com.
+# The fixture server is plain http on 127.0.0.1, so when it swaps the URL the shim also
+# widens those two flags to '=http,https' and reports the production redirect target as
+# url_effective, keeping the transport looking like production so the extraction guards
+# behind it can be exercised. Two switches undo that, so the suite can prove the transport
+# checks are wired into download_binary:
+#   SHIM_KEEP_PROTO=1           pass --proto/--proto-redir through unchanged
+#   SHIM_REAL_URL_EFFECTIVE=1   let curl report the real (127.0.0.1) url_effective
 set -u
 : "${REAL_CURL:?REAL_CURL must point at the real curl}"
 : "${TEST_DOWNLOAD_URL:?TEST_DOWNLOAD_URL must be set}"
 
+swapped=0
+for a in "$@"; do
+  case "$a" in
+    https://api.browserstack.com/sdk/v1/download_cli*) swapped=1 ;;
+  esac
+done
+
 args=()
+prev=""
 for a in "$@"; do
   case "$a" in
     https://api.browserstack.com/sdk/v1/download_cli*) a="$TEST_DOWNLOAD_URL" ;;
   esac
+  if [[ $swapped -eq 1 ]]; then
+    case "$prev" in
+      --proto|--proto-redir)
+        [[ "${SHIM_KEEP_PROTO:-0}" == 1 || "$a" != "=https" ]] || a="=http,https" ;;
+      -w)
+        [[ "${SHIM_REAL_URL_EFFECTIVE:-0}" == 1 || "$a" != "%{url_effective}" ]] \
+          || a="https://sdk-assets.browserstack.com/binary-test-fixture.zip" ;;
+    esac
+  fi
   args+=("$a")
+  prev="$a"
 done
 exec "$REAL_CURL" "${args[@]}"
